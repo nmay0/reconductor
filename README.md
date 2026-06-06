@@ -39,7 +39,7 @@ brew install nmap gobuster whatweb   # curl ships with macOS
 ## Run
 
 ```bash
-./.venv/bin/python -m reconlib
+./.venv/bin/python -m reconductor
 ```
 
 Menu:
