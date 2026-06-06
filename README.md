@@ -1,4 +1,4 @@
-# recon
+# reconductor
 
 A Python recon-automation tool that orchestrates `nmap`, `gobuster`, `whatweb`,
 and `curl` (for now) into a staged, partly-parallel pipeline with a small `rich`-based CLI.
