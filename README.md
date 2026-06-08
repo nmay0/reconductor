@@ -1,7 +1,8 @@
 # recon onion
 
-A Python recon-automation tool that orchestrates `nmap`, `gobuster`, `whatweb`,
-and `curl` (for now) into a staged, partly-parallel pipeline with a small `rich`-based CLI.
+A Python recon-automation tool that orchestrates `nmap`, `gobuster`, `ffuf`,
+`whatweb`, `curl`, and `searchsploit` into a staged, partly-parallel pipeline
+with a small `rich`-based CLI.
 
 > **Authorized testing only.** Use exclusively against systems you own or have
 > explicit written permission to assess.
@@ -13,11 +14,17 @@ For each target host:
 1. **Quick scan** — `nmap -F` (top ports) fires immediately.
 2. **Full scan** — `nmap -p-` runs *in parallel* with the quick scan.
 3. **Service scan** — once ports are known, `nmap -sV -sC` runs against the
-   union of all discovered open ports.
-4. **Web enumeration** — for every detected web port, `gobuster` + `whatweb` +
-   `curl -I` run *in parallel*.
+   union of all discovered open ports (also emitting an XML copy for the next step).
+4. **Exploit search** — `searchsploit --nmap` reads the service-scan XML and
+   searches Exploit-DB for each detected product/version.
+5. **Web enumeration** — for every detected web port, `gobuster` + `whatweb` +
+   `curl -I` (and `ffuf`, if enabled) run *in parallel*.
    - HTTPS-aware: `https://` scheme for gobuster/whatweb and `-k` for curl on
      443/8443 (or any `ssl`/`https` service), so self-signed certs don't break.
+
+`ffuf` is **off by default** (content discovery overlaps with `gobuster dir`);
+enable it via *Modify run* or the per-host CIDR prompt. `searchsploit` is on by
+default and only runs when the service scan produced results.
 
 CIDR ranges run an `nmap -sn` discovery sweep first, then **pause** so you can
 review the live hosts and exclude any before enumeration. Each kept host is then
@@ -33,8 +40,10 @@ python3 -m venv .venv
 External tools (install separately; missing ones are skipped with a warning):
 
 ```bash
-brew install nmap gobuster whatweb   # curl ships with macOS
+brew install nmap gobuster ffuf whatweb exploitdb   # curl ships with macOS
 ```
+
+(`exploitdb` provides `searchsploit`. `ffuf` is only needed if you enable it.)
 
 ## Run
 
@@ -92,7 +101,7 @@ your overrides** and missing keys fall back to defaults automatically.
 | --- | --- |
 | `nmap_timing` | `-T4` |
 | `output_dir` | `./recon` |
-| `wordlists.dir` | `/usr/share/wordlists/dirb/common.txt` |
+| `wordlists.dir` / `wordlists.ffuf` | `/usr/share/wordlists/dirb/common.txt` |
 | `wordlists.dns` / `wordlists.vhost` | seclists subdomains top-5000 |
 | `tool_flags.<tool>` | empty (extra flags per stage) |
 | `output_formats.<fmt>` | `summary`, `json`, `markdown` on; `raw`, `xml` off |
@@ -104,7 +113,8 @@ Output formats are toggled in **Edit config** with the `o` key (see [Output](#ou
 As the pipeline runs, each tool's **raw output is printed live** as a block the
 moment it completes — so it reads like a script running the tools, even though
 stages still run in parallel under the hood. A summary table (open ports,
-services, notable gobuster hits) prints at the end of each host.
+services, notable gobuster/ffuf hits, `searchsploit` matches) prints at the end
+of each host.
 
 Everything is also saved to disk:
 
@@ -112,7 +122,10 @@ Everything is also saved to disk:
 recon/<target-ip>/<timestamp>/
   nmap_quick.txt   nmap_full.txt   nmap_service.txt    # human-readable reports
   nmap_quick.gnmap nmap_full.gnmap nmap_service.gnmap  # grepable (machine) output
+  nmap_service.xml                                     # XML copy (fed to searchsploit)
+  searchsploit.txt                                     # Exploit-DB matches
   gobuster_dir_<port>[_<vhost>].txt  gobuster_vhost_<port>.txt  gobuster_dns.txt
+  ffuf_<port>[_<vhost>].txt
   whatweb_<port>[_<vhost>].txt  curl_<port>[_<vhost>].txt
   report.txt  report.raw.txt  report.json  report.xml  report.md  # consolidated
 ```
@@ -120,7 +133,8 @@ recon/<target-ip>/<timestamp>/
 The per-tool files above are **always** written as raw evidence. On top of those,
 each host run emits one **consolidated report** per format you've enabled — a
 single document built from the run's findings (open ports + services, web
-findings with parsed gobuster hits / `whatweb` tech / response headers, warnings):
+findings with parsed gobuster/ffuf hits / `whatweb` tech / response headers,
+`searchsploit` matches, warnings):
 
 | Format | File | Use |
 |--------|------|-----|

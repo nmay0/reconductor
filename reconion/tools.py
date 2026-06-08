@@ -12,6 +12,7 @@ data and pull notable hits out of gobuster output.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -158,10 +159,12 @@ def _nmap(
     *,
     timing: str,
     extra: str,
+    xml: Path | None = None,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> ToolResult:
     """Run nmap with the human report on stdout (shown + saved) and grepable
-    output to a side file (parsed into ports/hosts)."""
+    output to a side file (parsed into ports/hosts). When *xml* is given, an
+    XML copy is emitted too (consumed by searchsploit --nmap)."""
     grep_path = artifact.with_suffix(".gnmap")
     command = [
         "nmap",
@@ -170,8 +173,10 @@ def _nmap(
         *flag_list(extra),
         "-oN", "-",
         "-oG", str(grep_path),
-        target,
     ]
+    if xml is not None:
+        command += ["-oX", str(xml)]
+    command.append(target)
     result = _run(name, command, artifact, write_stdout=True, timeout=timeout)
     try:
         result.grepable = grep_path.read_text(encoding="utf-8")
@@ -196,9 +201,14 @@ def nmap_full(target: str, artifact: Path, *, timing: str, extra: str) -> ToolRe
 
 
 def nmap_service(
-    target: str, ports: list[int], artifact: Path, *, timing: str, extra: str
+    target: str, ports: list[int], artifact: Path, *, timing: str, extra: str,
+    xml_path: Path | None = None,
 ) -> ToolResult:
-    """Service/version + default-script scan limited to discovered ports."""
+    """Service/version + default-script scan limited to discovered ports.
+
+    *xml_path*, when given, captures an XML copy of the scan that searchsploit
+    can consume via ``searchsploit --nmap``.
+    """
     port_arg = ",".join(str(p) for p in sorted(ports))
     return _nmap(
         "nmap_service",
@@ -207,6 +217,7 @@ def nmap_service(
         artifact,
         timing=timing,
         extra=extra,
+        xml=xml_path,
     )
 
 
@@ -278,6 +289,22 @@ def gobuster_dir(url: str, wordlist: str, artifact: Path, *, extra: str,
     return _run("gobuster_dir", command, artifact)
 
 
+def ffuf_dir(url: str, wordlist: str, artifact: Path, *, extra: str,
+             host_header: str | None = None) -> ToolResult:
+    """Fast content discovery: fuzz the FUZZ keyword at the URL path.
+
+    ffuf ignores TLS cert errors by default, so no insecure flag is needed for
+    https targets. Like gobuster_dir, a Host header can target a virtual host on
+    the same IP without an /etc/hosts entry.
+    """
+    fuzz_url = url.rstrip("/") + "/FUZZ"
+    command = ["ffuf", "-u", fuzz_url, "-w", wordlist, "-noninteractive"]
+    if host_header:
+        command += ["-H", f"Host: {host_header}"]
+    command += flag_list(extra)
+    return _run("ffuf", command, artifact)
+
+
 def gobuster_dns(domain: str, wordlist: str, artifact: Path, *, extra: str) -> ToolResult:
     command = ["gobuster", "dns", "-d", domain, "-w", wordlist, "-q", "--no-color"]
     command += flag_list(extra)
@@ -337,3 +364,78 @@ def parse_gobuster_hits(stdout: str) -> list[str]:
         elif line.startswith("Found:"):  # dns mode
             hits.append(line)
     return hits
+
+
+# ffuf result line: "admin   [Status: 301, Size: 312, Words: 20, Lines: 10, ...]"
+_FFUF_LINE_RE = re.compile(
+    r"^\s*(?P<path>\S+)\s+\[Status:\s*(?P<status>\d+),"
+    r"\s*Size:\s*(?P<size>\d+)"
+)
+
+
+def parse_ffuf_hits(stdout: str) -> list[str]:
+    """Return notable result lines from ffuf output (status-filtered)."""
+    hits: list[str] = []
+    for line in stdout.splitlines():
+        m = _FFUF_LINE_RE.match(line)
+        if m and int(m.group("status")) in GOBUSTER_INTERESTING:
+            hits.append(line.strip())
+    return hits
+
+
+def parse_ffuf_structured(stdout: str) -> list[dict]:
+    """Parse ffuf output into {path, status, size} records."""
+    hits: list[dict] = []
+    for line in stdout.splitlines():
+        m = _FFUF_LINE_RE.match(line)
+        if not m:
+            continue
+        status = int(m.group("status"))
+        if status not in GOBUSTER_INTERESTING:
+            continue
+        hits.append({
+            "path": m.group("path"),
+            "status": status,
+            "size": int(m.group("size")),
+        })
+    return hits
+
+
+# --------------------------------------------------------------------------- #
+# Exploit search
+# --------------------------------------------------------------------------- #
+
+def searchsploit_nmap(xml_path: Path, artifact: Path, *, extra: str) -> ToolResult:
+    """Search Exploit-DB for the services in an nmap service-scan XML file.
+
+    `searchsploit --nmap` parses the XML itself and searches each product /
+    version it finds — far more reliable than building search terms by hand.
+    Output is uncoloured automatically when not attached to a tty.
+    """
+    command = ["searchsploit", "--nmap", str(xml_path)]
+    command += flag_list(extra)
+    return _run("searchsploit", command, artifact)
+
+
+def parse_searchsploit(stdout: str) -> list[dict]:
+    """Parse searchsploit's two-column table into {title, path} records.
+
+    Tolerant of the box-drawing layout: data rows are 'Title | path'; header,
+    separator and 'No Results' lines are skipped.
+    """
+    results: list[dict] = []
+    for raw in stdout.splitlines():
+        if "|" not in raw:
+            continue
+        stripped = raw.strip()
+        if not stripped or set(stripped) <= set("-=| "):
+            continue  # separator / rule line
+        title, _, path = raw.rpartition("|")
+        title, path = title.strip(), path.strip()
+        if not title or not path:
+            continue
+        if title.lower().startswith(("exploit title", "shellcode title",
+                                     "paper title")):
+            continue  # column header
+        results.append({"title": title, "path": path})
+    return results

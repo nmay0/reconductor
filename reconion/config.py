@@ -17,11 +17,12 @@ CONFIG_PATH = Path("./recon_config.json")
 
 # The full default config. Anything not overridden falls back to this.
 DEFAULT_CONFIG: dict[str, Any] = {
-    # Wordlists used by the three gobuster modes.
+    # Wordlists used by the three gobuster modes plus ffuf content discovery.
     "wordlists": {
         "dir": "/usr/share/wordlists/dirb/common.txt",
         "dns": "/usr/share/wordlists/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
         "vhost": "/usr/share/wordlists/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
+        "ffuf": "/usr/share/wordlists/dirb/common.txt",
     },
     # nmap timing template applied to every nmap stage.
     "nmap_timing": "-T4",
@@ -34,8 +35,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "nmap_full": "",
         "nmap_service": "",
         "gobuster": "",
+        "ffuf": "",
         "whatweb": "",
         "curl": "",
+        "searchsploit": "",
     },
     # Consolidated reports emitted at the end of each host run (in addition to
     # the always-written per-tool artifacts). Keys must match report.REPORT_FORMATS.

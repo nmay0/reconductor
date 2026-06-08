@@ -54,8 +54,10 @@ def print_summary(
     ports: list[Port],
     gobuster_hits: dict[str, list[str]],
     errors: list[str],
+    ffuf_hits: dict[str, list[str]] | None = None,
+    exploits: list[dict] | None = None,
 ) -> None:
-    """Print the per-host wrap-up: open ports, services, notable gobuster hits."""
+    """Print the per-host wrap-up: open ports, services, notable hits, exploits."""
     console.print()
     console.rule(f"[bold]Summary — {host}[/bold]")
 
@@ -85,6 +87,29 @@ def print_summary(
             console.print(table)
     elif gobuster_hits:
         console.print("[dim]No notable gobuster hits.[/dim]")
+
+    ffuf_hits = ffuf_hits or {}
+    for url, hits in ((u, h) for u, h in ffuf_hits.items() if h):
+        table = Table(title=f"ffuf hits — {url}", title_style="bold blue",
+                      header_style="bold", show_header=False)
+        table.add_column("hit", overflow="fold")
+        for hit in hits[:40]:
+            table.add_row(hit)
+        if len(hits) > 40:
+            table.add_row(f"... and {len(hits) - 40} more (see artifact)")
+        console.print(table)
+
+    exploits = exploits or []
+    if exploits:
+        table = Table(title="searchsploit — possible exploits",
+                      title_style="bold red", header_style="bold")
+        table.add_column("Title", overflow="fold")
+        table.add_column("Path", overflow="fold", style="dim")
+        for ex in exploits[:40]:
+            table.add_row(ex.get("title", ""), ex.get("path", ""))
+        if len(exploits) > 40:
+            table.add_row(f"... and {len(exploits) - 40} more (see artifact)", "")
+        console.print(table)
 
     if errors:
         console.print(Panel("\n".join(errors), title="Warnings / skipped",

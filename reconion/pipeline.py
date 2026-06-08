@@ -23,12 +23,14 @@ from . import report, tools
 from .output import make_run_dir, print_summary, print_tool_block
 from .tools import Port, ToolResult, ToolRun
 
-# Toggle keys, all default-on except the optional gobuster modes.
+# Toggle keys, all default-on except the optional gobuster modes and ffuf.
 DEFAULT_TOGGLES: dict[str, bool] = {
     "nmap_quick": True,
     "nmap_full": True,
     "nmap_service": True,
+    "searchsploit": True,
     "gobuster_dir": True,
+    "ffuf": False,           # opt-in: enable manually via 'Modify run'
     "gobuster_dns": False,
     "gobuster_vhost": False,
     "whatweb": True,
@@ -42,6 +44,8 @@ class HostResult:
     run_dir: Path
     ports: list[Port] = field(default_factory=list)
     gobuster_hits: dict[str, list[str]] = field(default_factory=dict)
+    ffuf_hits: dict[str, list[str]] = field(default_factory=dict)
+    exploits: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     # Every tool executed this run, in completion order, for report building.
     tool_runs: list[ToolRun] = field(default_factory=list)
@@ -134,12 +138,13 @@ def run_host(
         )
 
     # ---- Stage 3: service/version/script scan ------------------------------
+    service_xml = run_dir / "nmap_service.xml"
     if open_ports and toggles.get("nmap_service", True):
         console.print("\n[bold]▶ Service / version / script scan[/bold]")
         res = tools.nmap_service(
             host, [p.number for p in open_ports],
             run_dir / "nmap_service.txt", timing=timing,
-            extra=tflags.get("nmap_service", ""))
+            extra=tflags.get("nmap_service", ""), xml_path=service_xml)
         _record(res, result.errors)
         print_tool_block(console, "nmap_service", res)
         result.tool_runs.append(
@@ -158,6 +163,24 @@ def run_host(
 
     result.ports = open_ports
 
+    # ---- Stage 3b: searchsploit against the service-scan XML ---------------
+    if toggles.get("searchsploit", True):
+        if service_xml.exists():
+            console.print("\n[bold]▶ Exploit search — searchsploit[/bold]")
+            res = tools.searchsploit_nmap(
+                service_xml, run_dir / "searchsploit.txt",
+                extra=tflags.get("searchsploit", ""))
+            _record(res, result.errors)
+            print_tool_block(console, "searchsploit", res)
+            result.tool_runs.append(ToolRun(
+                name="searchsploit", title="searchsploit", result=res,
+                kind="searchsploit"))
+            if res.ok:
+                result.exploits = tools.parse_searchsploit(res.stdout)
+        elif open_ports:
+            result.errors.append(
+                "searchsploit: skipped (needs the nmap service scan — enable it)")
+
     # ---- Stage 4: web tools, per detected web port -------------------------
     web_ports = [p for p in open_ports if p.is_web]
     if web_ports:
@@ -174,7 +197,8 @@ def run_host(
         console.print("  [dim]No web ports detected; skipping web tools.[/dim]")
 
     print_summary(console, host, run_dir, result.ports, result.gobuster_hits,
-                  result.errors)
+                  result.errors, ffuf_hits=result.ffuf_hits,
+                  exploits=result.exploits)
 
     # ---- Consolidated reports (formats chosen in config) -------------------
     document = report.build_document(
@@ -191,7 +215,7 @@ def run_host(
 
 def _wordlist_ok(path: str, label: str, errors: list[str]) -> bool:
     if not path or not Path(path).expanduser().exists():
-        errors.append(f"gobuster_{label}: wordlist not found ({path or 'unset'})")
+        errors.append(f"{label}: wordlist not found ({path or 'unset'})")
         return False
     return True
 
@@ -237,7 +261,7 @@ def _run_web_stage(
         # ---- discovery modes: against the IP, independent of Host header ----
         if toggles.get("gobuster_vhost", False) and domain:
             wl = wordlists.get("vhost", "")
-            if _wordlist_ok(wl, "vhost", result.errors):
+            if _wordlist_ok(wl, "gobuster_vhost", result.errors):
                 jobs.append((f"{ip_url} (vhost)", "vhost", p.number, None,
                              lambda url=ip_url, wl=wl, p=p, insecure=insecure:
                              tools.gobuster_vhost(
@@ -246,7 +270,7 @@ def _run_web_stage(
 
         if toggles.get("gobuster_dns", False) and domain and not dns_done:
             wl = wordlists.get("dns", "")
-            if _wordlist_ok(wl, "dns", result.errors):
+            if _wordlist_ok(wl, "gobuster_dns", result.errors):
                 dns_done = True
                 jobs.append((f"dns:{domain}", "dns", None, None, lambda wl=wl:
                              tools.gobuster_dns(
@@ -261,7 +285,7 @@ def _run_web_stage(
 
             if toggles.get("gobuster_dir", True):
                 wl = wordlists.get("dir", "")
-                if _wordlist_ok(wl, "dir", result.errors):
+                if _wordlist_ok(wl, "gobuster_dir", result.errors):
                     jobs.append((disp, "dir", p.number, host_header,
                                  lambda url=ip_url, wl=wl, p=p, insecure=insecure,
                                  hh=host_header, sfx=suffix: tools.gobuster_dir(
@@ -269,6 +293,17 @@ def _run_web_stage(
                                      run_dir / f"gobuster_dir_{p.number}{sfx}.txt",
                                      extra=tflags.get("gobuster", ""),
                                      insecure=insecure, host_header=hh)))
+
+            if toggles.get("ffuf", False):
+                wl = wordlists.get("ffuf", "")
+                if _wordlist_ok(wl, "ffuf", result.errors):
+                    jobs.append((disp, "ffuf", p.number, host_header,
+                                 lambda url=ip_url, wl=wl, p=p,
+                                 hh=host_header, sfx=suffix: tools.ffuf_dir(
+                                     url, wl,
+                                     run_dir / f"ffuf_{p.number}{sfx}.txt",
+                                     extra=tflags.get("ffuf", ""),
+                                     host_header=hh)))
 
             if toggles.get("whatweb", True):
                 jobs.append((disp, "whatweb", p.number, host_header,
@@ -305,3 +340,5 @@ def _run_web_stage(
                 port=port, vhost=vhost))
             if kind in ("dir", "vhost", "dns"):
                 result.gobuster_hits[url] = tools.parse_gobuster_hits(res.stdout)
+            elif kind == "ffuf":
+                result.ffuf_hits[url] = tools.parse_ffuf_hits(res.stdout)

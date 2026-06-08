@@ -24,7 +24,9 @@ from .output import print_tool_block
 from .pipeline import DEFAULT_TOGGLES, run_host
 from .report import REPORT_FORMATS
 
-REQUIRED_TOOLS = ["nmap", "gobuster", "whatweb", "curl"]
+# Tools checked at startup. ffuf is omitted on purpose: it's opt-in (off by
+# default), so its absence is only reported if a run actually enables it.
+REQUIRED_TOOLS = ["nmap", "gobuster", "whatweb", "curl", "searchsploit"]
 
 
 class Session:
@@ -304,13 +306,16 @@ EDITABLE_FIELDS: list[tuple[str, list[str]]] = [
     ("wordlist: dir", ["wordlists", "dir"]),
     ("wordlist: dns", ["wordlists", "dns"]),
     ("wordlist: vhost", ["wordlists", "vhost"]),
+    ("wordlist: ffuf", ["wordlists", "ffuf"]),
     ("extra flags: nmap_sweep", ["tool_flags", "nmap_sweep"]),
     ("extra flags: nmap_quick", ["tool_flags", "nmap_quick"]),
     ("extra flags: nmap_full", ["tool_flags", "nmap_full"]),
     ("extra flags: nmap_service", ["tool_flags", "nmap_service"]),
     ("extra flags: gobuster", ["tool_flags", "gobuster"]),
+    ("extra flags: ffuf", ["tool_flags", "ffuf"]),
     ("extra flags: whatweb", ["tool_flags", "whatweb"]),
     ("extra flags: curl", ["tool_flags", "curl"]),
+    ("extra flags: searchsploit", ["tool_flags", "searchsploit"]),
 ]
 
 

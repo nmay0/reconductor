@@ -20,7 +20,13 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
-from .tools import GOBUSTER_INTERESTING, ToolRun, parse_gobuster_hits
+from .tools import (
+    GOBUSTER_INTERESTING,
+    ToolRun,
+    parse_ffuf_structured,
+    parse_gobuster_hits,
+    parse_searchsploit,
+)
 
 SCHEMA_VERSION = 1
 
@@ -126,22 +132,25 @@ def build_document(
         "https": p.is_https,
     } for p in ports]
 
-    # Group content tools (dir/whatweb/curl) by web context = (port, vhost).
+    # Group content tools (dir/ffuf/whatweb/curl) by web context = (port, vhost).
     web_map: dict[tuple[int | None, str | None], dict[str, Any]] = {}
     discovery: dict[str, list[str]] = {"vhost": [], "dns": []}
+    exploits: list[dict[str, str]] = []
     for tr in tool_runs:
         out = tr.result.stdout or ""
-        if tr.kind in ("dir", "whatweb", "curl"):
+        if tr.kind in ("dir", "ffuf", "whatweb", "curl"):
             key = (tr.port, tr.vhost)
             entry = web_map.get(key)
             if entry is None:
                 entry = {"url": tr.title, "port": tr.port, "vhost": tr.vhost,
-                         "whatweb": "", "headers": {}, "gobuster": []}
+                         "whatweb": "", "headers": {}, "gobuster": [], "ffuf": []}
                 web_map[key] = entry
             if not entry["url"]:
                 entry["url"] = tr.title
             if tr.kind == "dir":
                 entry["gobuster"] = parse_gobuster_structured(out)
+            elif tr.kind == "ffuf":
+                entry["ffuf"] = parse_ffuf_structured(out)
             elif tr.kind == "whatweb":
                 entry["whatweb"] = extract_whatweb(out)
             elif tr.kind == "curl":
@@ -150,6 +159,8 @@ def build_document(
             discovery["vhost"] = parse_gobuster_hits(out)
         elif tr.kind == "dns":
             discovery["dns"] = parse_gobuster_hits(out)
+        elif tr.kind == "searchsploit":
+            exploits = parse_searchsploit(out)
 
     # Per-tool evidence files already in the run dir (reports not yet written).
     artifacts = sorted(
@@ -174,6 +185,7 @@ def build_document(
         "ports": ports_doc,
         "web": list(web_map.values()),
         "discovery": discovery,
+        "exploits": exploits,
         "warnings": list(warnings),
         "artifacts": artifacts,
     }
@@ -236,6 +248,20 @@ def _render_summary_text(doc: dict[str, Any]) -> str:
                     size = "" if hit["size"] is None else f"  size={hit['size']}"
                     redir = f"  --> {hit['redirect']}" if hit["redirect"] else ""
                     lines.append(f"      {hit['status']}  {hit['path']}{size}{redir}")
+            ffuf_hits = w.get("ffuf") or []
+            if ffuf_hits:
+                lines.append(f"    ffuf ({len(ffuf_hits)}):")
+                for hit in ffuf_hits:
+                    size = "" if hit["size"] is None else f"  size={hit['size']}"
+                    lines.append(f"      {hit['status']}  {hit['path']}{size}")
+        lines.append("")
+
+    exploits = doc.get("exploits", [])
+    if exploits:
+        lines.append(f"Exploits — searchsploit ({len(exploits)})")
+        for ex in exploits:
+            lines.append(f"  {ex['title']}")
+            lines.append(f"    {ex['path']}")
         lines.append("")
 
     disc = doc.get("discovery", {})
@@ -325,7 +351,27 @@ def _render_markdown(doc: dict[str, Any]) -> str:
                         f"| {_md_escape(hit['path'])} | {hit['status']} | "
                         f"{size} | {_md_escape(hit['redirect'] or '')} |"
                     )
+            ffuf_hits = w.get("ffuf") or []
+            if ffuf_hits:
+                lines.append("")
+                lines.append("| Path (ffuf) | Status | Size |")
+                lines.append("|---|---:|---:|")
+                for hit in ffuf_hits:
+                    size = "" if hit["size"] is None else str(hit["size"])
+                    lines.append(
+                        f"| {_md_escape(hit['path'])} | {hit['status']} | {size} |"
+                    )
             lines.append("")
+
+    exploits = doc.get("exploits", [])
+    if exploits:
+        lines.append("## Exploits (searchsploit)")
+        lines.append("")
+        lines.append("| Title | Path |")
+        lines.append("|---|---|")
+        for ex in exploits:
+            lines.append(f"| {_md_escape(ex['title'])} | {_md_escape(ex['path'])} |")
+        lines.append("")
 
     disc = doc.get("discovery", {})
     if disc.get("vhost") or disc.get("dns"):
@@ -412,6 +458,16 @@ def _render_xml(doc: dict[str, Any]) -> str:
                 "path": hit["path"], "status": str(hit["status"]),
                 "size": "" if hit["size"] is None else str(hit["size"]),
                 "redirect": hit["redirect"] or ""})
+        ffuf_el = ET.SubElement(target_el, "ffuf")
+        for hit in w.get("ffuf", []):
+            ET.SubElement(ffuf_el, "hit", {
+                "path": hit["path"], "status": str(hit["status"]),
+                "size": "" if hit["size"] is None else str(hit["size"])})
+
+    exploits_el = ET.SubElement(root, "exploits")
+    for ex in doc.get("exploits", []):
+        ET.SubElement(exploits_el, "exploit",
+                      {"title": ex["title"], "path": ex["path"]})
 
     disc = doc.get("discovery", {})
     disc_el = ET.SubElement(root, "discovery")
