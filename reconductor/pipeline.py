@@ -75,8 +75,13 @@ def run_host(
     config: dict[str, Any],
     toggles: dict[str, bool],
     domain: str | None = None,
+    vhosts: list[str] | None = None,
 ) -> HostResult:
-    """Run the full pipeline against one host and return its results."""
+    """Run the full pipeline against one host and return its results.
+
+    *vhosts* are virtual-host names to enumerate via Host-header injection
+    (gobuster -H / curl --resolve / whatweb --header) against the target IP.
+    """
     timing = config.get("nmap_timing", "-T4")
     tflags = config.get("tool_flags", {})
     wordlists = config.get("wordlists", {})
@@ -156,8 +161,10 @@ def run_host(
             + ", ".join(f"{p.number}({'https' if p.is_https else 'http'})"
                         for p in web_ports)
         )
+        if vhosts:
+            console.print("  Virtual hosts (Host header): " + ", ".join(vhosts))
         _run_web_stage(console, host, web_ports, config, toggles, domain,
-                       wordlists, tflags, run_dir, result)
+                       vhosts or [], wordlists, tflags, run_dir, result)
     else:
         console.print("  [dim]No web ports detected; skipping web tools.[/dim]")
 
@@ -173,6 +180,11 @@ def _wordlist_ok(path: str, label: str, errors: list[str]) -> bool:
     return True
 
 
+def _slug(name: str) -> str:
+    """Filesystem-safe slug for a hostname (for per-vhost artifact names)."""
+    return "".join(c if c.isalnum() or c in "-._" else "_" for c in name)
+
+
 def _run_web_stage(
     console: Console,
     host: str,
@@ -180,34 +192,37 @@ def _run_web_stage(
     config: dict[str, Any],
     toggles: dict[str, bool],
     domain: str | None,
+    vhosts: list[str],
     wordlists: dict[str, str],
     tflags: dict[str, str],
     run_dir: Path,
     result: HostResult,
 ) -> None:
-    """Run gobuster/whatweb/curl in parallel across all web ports."""
+    """Run gobuster/whatweb/curl in parallel across all web ports.
+
+    Discovery modes (gobuster vhost/dns) run once against the IP. The
+    content tools (gobuster dir / whatweb / curl) run once per Host-header
+    *context*: the bare IP when no vhosts are given, otherwise one pass per
+    supplied virtual host (Host header injected, IP unchanged).
+    """
     jobs: list[tuple[str, str, Callable[[], ToolResult]]] = []
     dns_done = False
+    # Each context is (host_header_or_None, filename_suffix).
+    contexts: list[tuple[str | None, str]] = (
+        [(vh, f"_{_slug(vh)}") for vh in vhosts] if vhosts else [(None, "")]
+    )
 
     for p in web_ports:
         scheme = "https" if p.is_https else "http"
         insecure = p.is_https
-        url = f"{scheme}://{host}:{p.number}"
-        tag = f"{scheme}_{p.number}"
+        ip_url = f"{scheme}://{host}:{p.number}"
 
-        if toggles.get("gobuster_dir", True):
-            wl = wordlists.get("dir", "")
-            if _wordlist_ok(wl, "dir", result.errors):
-                jobs.append((url, "dir", lambda url=url, wl=wl, p=p, insecure=insecure:
-                             tools.gobuster_dir(
-                                 url, wl, run_dir / f"gobuster_dir_{p.number}.txt",
-                                 extra=tflags.get("gobuster", ""), insecure=insecure)))
-
+        # ---- discovery modes: against the IP, independent of Host header ----
         if toggles.get("gobuster_vhost", False) and domain:
             wl = wordlists.get("vhost", "")
             if _wordlist_ok(wl, "vhost", result.errors):
-                jobs.append((f"{url} (vhost)", "vhost",
-                             lambda url=url, wl=wl, p=p, insecure=insecure:
+                jobs.append((f"{ip_url} (vhost)", "vhost",
+                             lambda url=ip_url, wl=wl, p=p, insecure=insecure:
                              tools.gobuster_vhost(
                                  url, wl, run_dir / f"gobuster_vhost_{p.number}.txt",
                                  extra=tflags.get("gobuster", ""), insecure=insecure)))
@@ -221,16 +236,39 @@ def _run_web_stage(
                                  domain, wl, run_dir / "gobuster_dns.txt",
                                  extra=tflags.get("gobuster", ""))))
 
-        if toggles.get("whatweb", True):
-            jobs.append((url, "whatweb", lambda url=url, p=p: tools.whatweb(
-                url, run_dir / f"whatweb_{p.number}.txt",
-                extra=tflags.get("whatweb", ""))))
+        # ---- content tools: once per Host-header context --------------------
+        for host_header, suffix in contexts:
+            # Display URL shows the vhost when set; curl pins it to the IP.
+            disp = (f"{scheme}://{host_header}:{p.number}"
+                    if host_header else ip_url)
 
-        if toggles.get("curl", True):
-            jobs.append((url, "curl", lambda url=url, p=p, insecure=insecure:
-                         tools.curl_headers(
-                             url, run_dir / f"curl_{p.number}.txt",
-                             insecure=insecure, extra=tflags.get("curl", ""))))
+            if toggles.get("gobuster_dir", True):
+                wl = wordlists.get("dir", "")
+                if _wordlist_ok(wl, "dir", result.errors):
+                    jobs.append((disp, "dir",
+                                 lambda url=ip_url, wl=wl, p=p, insecure=insecure,
+                                 hh=host_header, sfx=suffix: tools.gobuster_dir(
+                                     url, wl,
+                                     run_dir / f"gobuster_dir_{p.number}{sfx}.txt",
+                                     extra=tflags.get("gobuster", ""),
+                                     insecure=insecure, host_header=hh)))
+
+            if toggles.get("whatweb", True):
+                jobs.append((disp, "whatweb",
+                             lambda url=ip_url, p=p, hh=host_header, sfx=suffix:
+                             tools.whatweb(
+                                 url, run_dir / f"whatweb_{p.number}{sfx}.txt",
+                                 extra=tflags.get("whatweb", ""), host_header=hh)))
+
+            if toggles.get("curl", True):
+                resolve = ((host_header, p.number, host) if host_header else None)
+                curl_url = disp if host_header else ip_url
+                jobs.append((disp, "curl",
+                             lambda url=curl_url, p=p, insecure=insecure,
+                             res=resolve, sfx=suffix: tools.curl_headers(
+                                 url, run_dir / f"curl_{p.number}{sfx}.txt",
+                                 insecure=insecure, extra=tflags.get("curl", ""),
+                                 resolve=res)))
 
     if not jobs:
         return

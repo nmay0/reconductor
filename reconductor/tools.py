@@ -243,10 +243,14 @@ GOBUSTER_INTERESTING = {200, 204, 301, 302, 307, 308, 401, 403, 405}
 
 
 def gobuster_dir(url: str, wordlist: str, artifact: Path, *, extra: str,
-                 insecure: bool) -> ToolResult:
+                 insecure: bool, host_header: str | None = None) -> ToolResult:
     command = ["gobuster", "dir", "-u", url, "-w", wordlist, "-q", "--no-color"]
     if insecure:
         command.append("-k")
+    if host_header:
+        # Target the IP but route to the right virtual host via the Host header,
+        # so no /etc/hosts entry is required.
+        command += ["-H", f"Host: {host_header}"]
     command += flag_list(extra)
     return _run("gobuster_dir", command, artifact)
 
@@ -267,15 +271,25 @@ def gobuster_vhost(url: str, wordlist: str, artifact: Path, *, extra: str,
     return _run("gobuster_vhost", command, artifact)
 
 
-def whatweb(url: str, artifact: Path, *, extra: str) -> ToolResult:
-    command = ["whatweb", "--color=never", *flag_list(extra), url]
+def whatweb(url: str, artifact: Path, *, extra: str,
+            host_header: str | None = None) -> ToolResult:
+    command = ["whatweb", "--color=never"]
+    if host_header:
+        command += ["--header", f"Host: {host_header}"]
+    command += [*flag_list(extra), url]
     return _run("whatweb", command, artifact)
 
 
-def curl_headers(url: str, artifact: Path, *, insecure: bool, extra: str) -> ToolResult:
+def curl_headers(url: str, artifact: Path, *, insecure: bool, extra: str,
+                 resolve: tuple[str, int, str] | None = None) -> ToolResult:
     command = ["curl", "-sS", "-D", "-", "-o", "/dev/null", "--max-time", "20"]
     if insecure:
         command.append("-k")
+    if resolve:
+        # --resolve host:port:ip pins DNS *and* TLS SNI to the target IP while
+        # the URL keeps the hostname — the rootless equivalent of /etc/hosts.
+        host, port, ip = resolve
+        command += ["--resolve", f"{host}:{port}:{ip}"]
     command += flag_list(extra)
     command.append(url)
     return _run("curl", command, artifact)

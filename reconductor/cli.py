@@ -13,7 +13,7 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from . import tools
+from . import hosts, tools
 from .config import (
     CONFIG_PATH,
     DEFAULT_CONFIG,
@@ -26,11 +26,12 @@ REQUIRED_TOOLS = ["nmap", "gobuster", "whatweb", "curl"]
 
 
 class Session:
-    """Per-session, non-persisted state (the 'Modify run' toggles + domain)."""
+    """Per-session, non-persisted state (the 'Modify run' toggles + domain + vhosts)."""
 
     def __init__(self) -> None:
         self.toggles: dict[str, bool] = copy.deepcopy(DEFAULT_TOGGLES)
         self.domain: str | None = None
+        self.vhosts: list[str] = []
 
 
 # --------------------------------------------------------------------------- #
@@ -110,6 +111,44 @@ def _maybe_domain(console: Console, toggles: dict[str, bool],
     return current
 
 
+def _prompt_vhosts(console: Console, default: list[str]) -> list[str]:
+    """Ask for virtual-host names to enumerate via Host-header injection."""
+    raw = Prompt.ask(
+        "Virtual host name(s) for Host-header enum (comma-separated, blank = none)",
+        default=",".join(default),
+    ).strip()
+    if not raw:
+        return []
+    return [v.strip() for v in raw.split(",") if v.strip()]
+
+
+def _run_target(
+    console: Console,
+    ip: str,
+    config: dict[str, Any],
+    toggles: dict[str, bool],
+    domain: str | None,
+    vhosts: list[str],
+) -> None:
+    """Optionally seed /etc/hosts, run the pipeline, then offer cleanup.
+
+    Header injection makes /etc/hosts unnecessary for the scan itself; the
+    entries are purely a convenience for other tools/browsers, so they're
+    opt-in and removed again on request.
+    """
+    added: list[str] = []
+    if vhosts:
+        added = hosts.add_entries(console, ip, vhosts)
+    try:
+        run_host(console, ip, config, toggles, domain, vhosts)
+    finally:
+        if added and Confirm.ask(
+            f"Remove the {len(added)} /etc/hosts entry(ies) added for {ip}?",
+            default=True,
+        ):
+            hosts.remove_entries(console, ip, added)
+
+
 # --------------------------------------------------------------------------- #
 # Run flow
 # --------------------------------------------------------------------------- #
@@ -170,7 +209,8 @@ def run_flow(console: Console, session: Session) -> None:
     if single is not None:
         config = _ask_config(console)
         domain = _maybe_domain(console, session.toggles, session.domain)
-        run_host(console, single, config, session.toggles, domain)
+        vhosts = _prompt_vhosts(console, session.vhosts)
+        _run_target(console, single, config, session.toggles, domain, vhosts)
         return
 
     # ---- CIDR / range: sweep -> review/exclude -> per-host -----------------
@@ -199,7 +239,8 @@ def run_flow(console: Console, session: Session) -> None:
         else:
             toggles = copy.deepcopy(session.toggles)
         domain = _maybe_domain(console, toggles, session.domain)
-        run_host(console, host, config, toggles, domain)
+        vhosts = _prompt_vhosts(console, session.vhosts)
+        _run_target(console, host, config, toggles, domain, vhosts)
 
 
 # --------------------------------------------------------------------------- #
@@ -289,6 +330,7 @@ def modify_run_flow(console: Console, session: Session) -> None:
         border_style="cyan"))
     session.toggles = edit_toggles(console, session.toggles)
     session.domain = _maybe_domain(console, session.toggles, session.domain)
+    session.vhosts = _prompt_vhosts(console, session.vhosts)
 
 
 # --------------------------------------------------------------------------- #
@@ -309,7 +351,7 @@ def main() -> None:
     console = Console()
     session = Session()
     console.print(Panel.fit(
-        "[bold]recon[/bold] — pentesting recon automation\n"
+        "[bold]reconductor[/bold] — pentesting recon automation\n"
         "[dim]Authorized testing only.[/dim]", border_style="green"))
     _preflight(console)
 
