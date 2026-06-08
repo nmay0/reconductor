@@ -353,7 +353,7 @@ def main() -> None:
     console = Console()
     session = Session()
     console.print(Panel.fit(
-        "[bold]reconductor[/bold] — pentesting recon automation\n"
+        "[bold]recon onion[/bold] — pentesting recon automation\n"
         "[dim]Authorized testing only.[/dim]", border_style="green"))
     _preflight(console)
 

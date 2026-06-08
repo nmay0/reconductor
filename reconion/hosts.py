@@ -18,7 +18,7 @@ from rich.prompt import Confirm
 
 HOSTS_PATH = Path("/etc/hosts")
 # Tag appended to lines we add, so cleanup only ever touches our own entries.
-TAG = "# added by reconductor"
+TAG = "# added by reconion"
 
 
 def resolves_to(name: str, ip: str) -> bool:
@@ -91,6 +91,6 @@ def remove_entries(console: Console, ip: str, names: list[str]) -> None:
     new_content = "\n".join(kept) + "\n"
     ok, msg = _sudo_write(new_content, append=False)
     if ok:
-        console.print(f"[green]Removed reconductor entries from {HOSTS_PATH}.[/green]")
+        console.print(f"[green]Removed reconion entries from {HOSTS_PATH}.[/green]")
     else:
         console.print(f"[red]Failed to clean /etc/hosts: {msg}[/red]")

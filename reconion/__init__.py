@@ -1,4 +1,4 @@
-"""recon — a pentesting recon automation tool.
+"""recon onion — a pentesting recon automation tool.
 
 Wraps nmap / gobuster / whatweb / curl into a staged, partly-parallel
 pipeline driven by a small rich-based CLI. Intended for authorized

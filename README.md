@@ -1,4 +1,4 @@
-# reconductor
+# recon onion
 
 A Python recon-automation tool that orchestrates `nmap`, `gobuster`, `whatweb`,
 and `curl` (for now) into a staged, partly-parallel pipeline with a small `rich`-based CLI.
@@ -39,7 +39,7 @@ brew install nmap gobuster whatweb   # curl ships with macOS
 ## Run
 
 ```bash
-./.venv/bin/python -m reconductor
+./.venv/bin/python -m reconion
 ```
 
 Menu:
@@ -62,7 +62,7 @@ modes enumerate names rather than scan an IP.
 
 Name-based virtual hosts normally won't respond correctly when you hit the raw
 IP — the server needs the right `Host:` header (and, over HTTPS, the right SNI).
-The usual fix is editing `/etc/hosts`; reconductor avoids that.
+The usual fix is editing `/etc/hosts`; recon onion avoids that.
 
 When prompted for **"Virtual host name(s)"**, enter one or more hostnames
 (comma-separated). For each, the content tools run against the target **IP**
@@ -78,7 +78,7 @@ Artifacts are written per vhost (e.g. `gobuster_dir_80_app.htb.txt`). To
 *discover* unknown vhosts in the first place, enable `gobuster_vhost`.
 
 If you also want a real `/etc/hosts` entry (so a browser or other tools resolve
-the name too), reconductor detects names that don't resolve to the target and
+the name too), recon onion detects names that don't resolve to the target and
 **offers** to add `IP  hostname` lines via `sudo` — opt-in, tagged, and removed
 again at the end if you choose. Header injection works regardless, so this is
 purely a convenience.
