@@ -59,6 +59,9 @@ class ToolResult:
     artifact: Path | None = None
     skipped: bool = False
     error: str = ""
+    # nmap only: grepable output captured to a side file for parsing, kept
+    # separate from the human-readable report shown to the user.
+    grepable: str = ""
 
     @property
     def ok(self) -> bool:
@@ -144,17 +147,24 @@ def _nmap(
     extra: str,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> ToolResult:
-    """Run nmap writing normal output to *artifact* and grepable to stdout."""
+    """Run nmap with the human report on stdout (shown + saved) and grepable
+    output to a side file (parsed into ports/hosts)."""
+    grep_path = artifact.with_suffix(".gnmap")
     command = [
         "nmap",
         *flag_list(timing),
         *mode_flags,
         *flag_list(extra),
-        "-oN", str(artifact),
-        "-oG", "-",
+        "-oN", "-",
+        "-oG", str(grep_path),
         target,
     ]
-    return _run(name, command, artifact, write_stdout=False, timeout=timeout)
+    result = _run(name, command, artifact, write_stdout=True, timeout=timeout)
+    try:
+        result.grepable = grep_path.read_text(encoding="utf-8")
+    except OSError:
+        result.grepable = result.stdout  # fall back to parsing the report
+    return result
 
 
 def nmap_sweep(target: str, artifact: Path, *, timing: str, extra: str) -> ToolResult:

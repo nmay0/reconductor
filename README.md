@@ -98,13 +98,19 @@ your overrides** and missing keys fall back to defaults automatically.
 
 ## Output
 
+As the pipeline runs, each tool's **raw output is printed live** as a block the
+moment it completes — so it reads like a script running the tools, even though
+stages still run in parallel under the hood. A summary table (open ports,
+services, notable gobuster hits) prints at the end of each host.
+
+Everything is also saved to disk:
+
 ```
 recon/<target-ip>/<timestamp>/
-  nmap_quick.txt  nmap_full.txt  nmap_service.txt
-  gobuster_dir_<port>.txt  gobuster_vhost_<port>.txt  gobuster_dns.txt
-  whatweb_<port>.txt  curl_<port>.txt
+  nmap_quick.txt   nmap_full.txt   nmap_service.txt    # human-readable reports
+  nmap_quick.gnmap nmap_full.gnmap nmap_service.gnmap  # grepable (machine) output
+  gobuster_dir_<port>[_<vhost>].txt  gobuster_vhost_<port>.txt  gobuster_dns.txt
+  whatweb_<port>[_<vhost>].txt  curl_<port>[_<vhost>].txt
 ```
 
-One file per tool, timestamped per run, so previous runs are never overwritten.
-A summary (open ports, services, notable gobuster hits) prints to the terminal
-at the end of each host.
+Timestamped per run, so previous runs are never overwritten.

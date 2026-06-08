@@ -20,6 +20,7 @@ from .config import (
     load_config,
     save_custom_config,
 )
+from .output import print_tool_block
 from .pipeline import DEFAULT_TOGGLES, run_host
 
 REQUIRED_TOOLS = ["nmap", "gobuster", "whatweb", "curl"]
@@ -165,14 +166,15 @@ def _sweep_live_hosts(console: Console, network: str,
     sweep_dir = Path(config.get("output_dir", "./recon")).expanduser() / "_sweeps"
     sweep_dir.mkdir(parents=True, exist_ok=True)
     artifact = sweep_dir / f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-    with console.status(f"[bold]Host discovery sweep of {network}…[/bold]"):
-        res = tools.nmap_sweep(
-            network, artifact, timing=config.get("nmap_timing", "-T4"),
-            extra=config.get("tool_flags", {}).get("nmap_sweep", ""))
+    console.print(f"\n[bold]▶ Host discovery sweep — {network}[/bold]")
+    res = tools.nmap_sweep(
+        network, artifact, timing=config.get("nmap_timing", "-T4"),
+        extra=config.get("tool_flags", {}).get("nmap_sweep", ""))
+    print_tool_block(console, "nmap_sweep", res)
     if res.skipped or res.error:
         console.print(f"[red]Sweep failed: {res.error or res.returncode}[/red]")
         return []
-    return tools.parse_grepable_hosts(res.stdout)
+    return tools.parse_grepable_hosts(res.grepable)
 
 
 def _select_hosts(console: Console, live: list[str]) -> list[str]:

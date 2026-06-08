@@ -8,8 +8,35 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
-from .tools import Port
+from .tools import Port, ToolResult
+
+
+def print_tool_block(console: Console, title: str, result: ToolResult) -> None:
+    """Print one tool's raw output as a self-contained block when it finishes.
+
+    Output is rendered as plain Text (no rich markup/highlighting) so brackets
+    and other literal content in tool output are shown verbatim.
+    """
+    console.rule(f"[bold cyan]{title}[/bold cyan]", align="left")
+    if result.command:
+        console.print(f"[dim]$ {result.cmdline}[/dim]", highlight=False)
+    if result.skipped:
+        console.print(f"[yellow]skipped — {result.error}[/yellow]")
+        return
+
+    body = (result.stdout or "").strip("\n")
+    if body:
+        console.print(Text(body))
+    else:
+        console.print("[dim](no output)[/dim]")
+
+    stderr = (result.stderr or "").strip()
+    if stderr and not result.ok:
+        console.print(Text(stderr, style="red"))
+    if result.error:
+        console.print(f"[yellow]! {result.error}[/yellow]")
 
 
 def make_run_dir(output_dir: str, host: str) -> Path:

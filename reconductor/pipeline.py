@@ -19,7 +19,7 @@ from typing import Any, Callable
 from rich.console import Console
 
 from . import tools
-from .output import make_run_dir, print_summary
+from .output import make_run_dir, print_summary, print_tool_block
 from .tools import Port, ToolResult
 
 # Toggle keys, all default-on except the optional gobuster modes.
@@ -105,23 +105,19 @@ def run_host(
             extra=tflags.get("nmap_full", ""))))
 
     if scan_jobs:
-        with console.status("[bold]Port scanning (quick + full in parallel)…[/bold]"):
-            with ThreadPoolExecutor(max_workers=len(scan_jobs)) as ex:
-                futures = {ex.submit(fn): name for name, fn in scan_jobs}
-                for fut in as_completed(futures):
-                    name = futures[fut]
-                    res = fut.result()
-                    _record(res, result.errors)
-                    found = tools.parse_grepable_ports(res.stdout)
-                    if name == "nmap_quick":
-                        quick_ports = found
-                    else:
-                        full_ports = found
-                    console.print(
-                        f"  [green]✓[/green] {name}: "
-                        f"{len(found)} open" if res.ok
-                        else f"  [yellow]•[/yellow] {name}: {res.error or res.returncode}"
-                    )
+        console.print("\n[bold]▶ Port scan — quick + full (parallel)[/bold]")
+        with ThreadPoolExecutor(max_workers=len(scan_jobs)) as ex:
+            futures = {ex.submit(fn): name for name, fn in scan_jobs}
+            for fut in as_completed(futures):
+                name = futures[fut]
+                res = fut.result()
+                _record(res, result.errors)
+                print_tool_block(console, name, res)
+                found = tools.parse_grepable_ports(res.grepable)
+                if name == "nmap_quick":
+                    quick_ports = found
+                else:
+                    full_ports = found
 
     merged = _merge_ports(quick_ports, full_ports)
     open_ports = sorted(merged.values(), key=lambda p: p.number)
@@ -133,13 +129,14 @@ def run_host(
 
     # ---- Stage 3: service/version/script scan ------------------------------
     if open_ports and toggles.get("nmap_service", True):
-        with console.status("[bold]Service / version / script scan…[/bold]"):
-            res = tools.nmap_service(
-                host, [p.number for p in open_ports],
-                run_dir / "nmap_service.txt", timing=timing,
-                extra=tflags.get("nmap_service", ""))
+        console.print("\n[bold]▶ Service / version / script scan[/bold]")
+        res = tools.nmap_service(
+            host, [p.number for p in open_ports],
+            run_dir / "nmap_service.txt", timing=timing,
+            extra=tflags.get("nmap_service", ""))
         _record(res, result.errors)
-        svc_ports = tools.parse_grepable_ports(res.stdout)
+        print_tool_block(console, "nmap_service", res)
+        svc_ports = tools.parse_grepable_ports(res.grepable)
         merged = _merge_ports(open_ports, svc_ports)
         # service scan is authoritative for service/version
         for sp in svc_ports:
@@ -149,7 +146,6 @@ def run_host(
                 if sp.version:
                     merged[sp.number].version = sp.version
         open_ports = sorted(merged.values(), key=lambda p: p.number)
-        console.print(f"  [green]✓[/green] nmap_service: {len(svc_ports)} ports detailed")
 
     result.ports = open_ports
 
@@ -273,24 +269,14 @@ def _run_web_stage(
     if not jobs:
         return
 
-    with console.status("[bold]Web enumeration (gobuster / whatweb / curl)…[/bold]"):
-        with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as ex:
-            futures = {ex.submit(fn): (url, kind) for url, kind, fn in jobs}
-            for fut in as_completed(futures):
-                url, kind = futures[fut]
-                res = fut.result()
-                _record(res, result.errors)
-                if kind in ("dir", "vhost", "dns"):
-                    hits = tools.parse_gobuster_hits(res.stdout)
-                    key = url
-                    result.gobuster_hits[key] = hits
-                    console.print(
-                        f"  [green]✓[/green] gobuster {kind} {url}: {len(hits)} hits"
-                        if res.ok else
-                        f"  [yellow]•[/yellow] gobuster {kind} {url}: "
-                        f"{res.error or res.returncode}")
-                else:
-                    console.print(
-                        f"  [green]✓[/green] {kind} {url}"
-                        if res.ok else
-                        f"  [yellow]•[/yellow] {kind} {url}: {res.error or res.returncode}")
+    console.print("\n[bold]▶ Web enumeration — gobuster / whatweb / curl "
+                  "(parallel)[/bold]")
+    with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as ex:
+        futures = {ex.submit(fn): (url, kind) for url, kind, fn in jobs}
+        for fut in as_completed(futures):
+            url, kind = futures[fut]
+            res = fut.result()
+            _record(res, result.errors)
+            print_tool_block(console, f"{res.name} — {url}", res)
+            if kind in ("dir", "vhost", "dns"):
+                result.gobuster_hits[url] = tools.parse_gobuster_hits(res.stdout)
