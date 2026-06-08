@@ -72,6 +72,19 @@ class ToolResult:
         return " ".join(self.command)
 
 
+@dataclass
+class ToolRun:
+    """One executed tool within a host run, plus the context needed to fold it
+    into consolidated reports (which web target/port/vhost it belonged to)."""
+
+    name: str
+    title: str
+    result: "ToolResult"
+    kind: str = ""              # scan | dir | vhost | dns | whatweb | curl
+    port: int | None = None
+    vhost: str | None = None
+
+
 def tool_available(binary: str) -> bool:
     return shutil.which(binary) is not None
 

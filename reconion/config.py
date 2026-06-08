@@ -37,6 +37,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "whatweb": "",
         "curl": "",
     },
+    # Consolidated reports emitted at the end of each host run (in addition to
+    # the always-written per-tool artifacts). Keys must match report.REPORT_FORMATS.
+    "output_formats": {
+        "summary": True,    # report.txt   — human-readable findings
+        "raw": False,       # report.raw.txt — every tool's raw output, one file
+        "json": True,       # report.json  — structured, machine-readable
+        "xml": False,       # report.xml   — structured (custom schema)
+        "markdown": True,   # report.md    — reporting / notes
+    },
 }
 
 

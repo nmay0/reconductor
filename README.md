@@ -95,6 +95,9 @@ your overrides** and missing keys fall back to defaults automatically.
 | `wordlists.dir` | `/usr/share/wordlists/dirb/common.txt` |
 | `wordlists.dns` / `wordlists.vhost` | seclists subdomains top-5000 |
 | `tool_flags.<tool>` | empty (extra flags per stage) |
+| `output_formats.<fmt>` | `summary`, `json`, `markdown` on; `raw`, `xml` off |
+
+Output formats are toggled in **Edit config** with the `o` key (see [Output](#output)).
 
 ## Output
 
@@ -111,6 +114,23 @@ recon/<target-ip>/<timestamp>/
   nmap_quick.gnmap nmap_full.gnmap nmap_service.gnmap  # grepable (machine) output
   gobuster_dir_<port>[_<vhost>].txt  gobuster_vhost_<port>.txt  gobuster_dns.txt
   whatweb_<port>[_<vhost>].txt  curl_<port>[_<vhost>].txt
+  report.txt  report.raw.txt  report.json  report.xml  report.md  # consolidated
 ```
+
+The per-tool files above are **always** written as raw evidence. On top of those,
+each host run emits one **consolidated report** per format you've enabled — a
+single document built from the run's findings (open ports + services, web
+findings with parsed gobuster hits / `whatweb` tech / response headers, warnings):
+
+| Format | File | Use |
+|--------|------|-----|
+| Summary (txt) | `report.txt` | quick human-readable wrap-up |
+| Raw (txt) | `report.raw.txt` | every tool's raw output stitched into one file |
+| JSON | `report.json` | structured, machine-readable — pipe into other tooling |
+| XML | `report.xml` | structured (custom schema) |
+| Markdown | `report.md` | drop straight into a report or notes |
+
+Pick formats in **Edit config → `o`**; the choice is saved like any other config
+override. Defaults: `summary`, `json`, and `markdown` on.
 
 Timestamped per run, so previous runs are never overwritten.

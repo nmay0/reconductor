@@ -22,6 +22,7 @@ from .config import (
 )
 from .output import print_tool_block
 from .pipeline import DEFAULT_TOGGLES, run_host
+from .report import REPORT_FORMATS
 
 REQUIRED_TOOLS = ["nmap", "gobuster", "whatweb", "curl"]
 
@@ -97,6 +98,39 @@ def edit_toggles(console: Console, toggles: dict[str, bool]) -> dict[str, bool]:
                 continue
             key = keys[int(tok) - 1]
             working[key] = not working[key]
+
+
+def edit_output_formats(console: Console,
+                        formats: dict[str, bool]) -> dict[str, bool]:
+    """Interactively flip which consolidated report formats are emitted."""
+    working = copy.deepcopy(formats)
+    keys = [key for key, _, _ in REPORT_FORMATS]
+    for key in keys:  # fill any missing keys so toggling is well-defined
+        working.setdefault(key, False)
+    while True:
+        table = Table(header_style="bold")
+        table.add_column("#", justify="right")
+        table.add_column("Format")
+        table.add_column("File", style="dim")
+        table.add_column("Enabled")
+        for i, (key, label, filename) in enumerate(REPORT_FORMATS, start=1):
+            table.add_row(str(i), label, filename,
+                          "[green]on[/green]" if working.get(key)
+                          else "[red]off[/red]")
+        console.print(table)
+        raw = Prompt.ask(
+            "Toggle which # (comma-separated), or [bold]Enter[/bold] to accept",
+            default="",
+        ).strip()
+        if not raw:
+            return working
+        for tok in raw.split(","):
+            tok = tok.strip()
+            if not tok.isdigit() or not (1 <= int(tok) <= len(keys)):
+                console.print(f"[yellow]Ignoring invalid selection: {tok}[/yellow]")
+                continue
+            key = keys[int(tok) - 1]
+            working[key] = not working.get(key, False)
 
 
 def _maybe_domain(console: Console, toggles: dict[str, bool],
@@ -298,12 +332,24 @@ def edit_config_flow(console: Console) -> None:
             table.add_row(str(i), label, cur or "[dim](empty)[/dim]",
                           dflt or "(empty)")
         console.print(table)
+
+        fmts = cfg.get("output_formats", {})
+        enabled = [label for key, label, _ in REPORT_FORMATS if fmts.get(key)]
+        console.print(
+            "[bold]Output formats[/bold] ([cyan]o[/cyan] to edit): "
+            + (", ".join(enabled) if enabled else "[yellow]none[/yellow]"))
+
         raw = Prompt.ask(
-            "Edit which # ([bold]s[/bold]=save, [bold]q[/bold]=cancel)",
+            "Edit which # ([bold]o[/bold]=formats, [bold]s[/bold]=save, "
+            "[bold]q[/bold]=cancel)",
             default="s").strip().lower()
         if raw in ("q", "quit"):
             console.print("[yellow]Cancelled; no changes saved.[/yellow]")
             return
+        if raw == "o":
+            cfg["output_formats"] = edit_output_formats(
+                console, cfg.get("output_formats", {}))
+            continue
         if raw in ("s", "save", ""):
             overrides = save_custom_config(cfg)
             if overrides:

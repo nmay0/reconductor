@@ -13,14 +13,15 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from rich.console import Console
 
-from . import tools
+from . import report, tools
 from .output import make_run_dir, print_summary, print_tool_block
-from .tools import Port, ToolResult
+from .tools import Port, ToolResult, ToolRun
 
 # Toggle keys, all default-on except the optional gobuster modes.
 DEFAULT_TOGGLES: dict[str, bool] = {
@@ -42,6 +43,8 @@ class HostResult:
     ports: list[Port] = field(default_factory=list)
     gobuster_hits: dict[str, list[str]] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    # Every tool executed this run, in completion order, for report building.
+    tool_runs: list[ToolRun] = field(default_factory=list)
 
 
 def _record(result: ToolResult, errors: list[str]) -> None:
@@ -87,6 +90,7 @@ def run_host(
     wordlists = config.get("wordlists", {})
     run_dir = make_run_dir(config.get("output_dir", "./recon"), host)
     result = HostResult(host=host, run_dir=run_dir)
+    started = datetime.now()
 
     console.rule(f"[bold cyan]Recon — {host}[/bold cyan]")
     console.print(f"[dim]Output: {run_dir}[/dim]")
@@ -113,6 +117,8 @@ def run_host(
                 res = fut.result()
                 _record(res, result.errors)
                 print_tool_block(console, name, res)
+                result.tool_runs.append(
+                    ToolRun(name=name, title=name, result=res, kind="scan"))
                 found = tools.parse_grepable_ports(res.grepable)
                 if name == "nmap_quick":
                     quick_ports = found
@@ -136,6 +142,9 @@ def run_host(
             extra=tflags.get("nmap_service", ""))
         _record(res, result.errors)
         print_tool_block(console, "nmap_service", res)
+        result.tool_runs.append(
+            ToolRun(name="nmap_service", title="nmap_service", result=res,
+                    kind="scan"))
         svc_ports = tools.parse_grepable_ports(res.grepable)
         merged = _merge_ports(open_ports, svc_ports)
         # service scan is authoritative for service/version
@@ -166,6 +175,17 @@ def run_host(
 
     print_summary(console, host, run_dir, result.ports, result.gobuster_hits,
                   result.errors)
+
+    # ---- Consolidated reports (formats chosen in config) -------------------
+    document = report.build_document(
+        host=host, run_dir=run_dir, started=started, finished=datetime.now(),
+        config=config, toggles=toggles, domain=domain, vhosts=vhosts or [],
+        ports=result.ports, tool_runs=result.tool_runs, warnings=result.errors,
+    )
+    written = report.write_reports(
+        run_dir, document, result.tool_runs, config.get("output_formats", {}))
+    if written:
+        console.print(f"[dim]Reports: {', '.join(written)}[/dim]")
     return result
 
 
@@ -201,7 +221,8 @@ def _run_web_stage(
     *context*: the bare IP when no vhosts are given, otherwise one pass per
     supplied virtual host (Host header injected, IP unchanged).
     """
-    jobs: list[tuple[str, str, Callable[[], ToolResult]]] = []
+    # Each job: (display_url, kind, port, vhost, callable).
+    jobs: list[tuple[str, str, int | None, str | None, Callable[[], ToolResult]]] = []
     dns_done = False
     # Each context is (host_header_or_None, filename_suffix).
     contexts: list[tuple[str | None, str]] = (
@@ -217,7 +238,7 @@ def _run_web_stage(
         if toggles.get("gobuster_vhost", False) and domain:
             wl = wordlists.get("vhost", "")
             if _wordlist_ok(wl, "vhost", result.errors):
-                jobs.append((f"{ip_url} (vhost)", "vhost",
+                jobs.append((f"{ip_url} (vhost)", "vhost", p.number, None,
                              lambda url=ip_url, wl=wl, p=p, insecure=insecure:
                              tools.gobuster_vhost(
                                  url, wl, run_dir / f"gobuster_vhost_{p.number}.txt",
@@ -227,7 +248,7 @@ def _run_web_stage(
             wl = wordlists.get("dns", "")
             if _wordlist_ok(wl, "dns", result.errors):
                 dns_done = True
-                jobs.append((f"dns:{domain}", "dns", lambda wl=wl:
+                jobs.append((f"dns:{domain}", "dns", None, None, lambda wl=wl:
                              tools.gobuster_dns(
                                  domain, wl, run_dir / "gobuster_dns.txt",
                                  extra=tflags.get("gobuster", ""))))
@@ -241,7 +262,7 @@ def _run_web_stage(
             if toggles.get("gobuster_dir", True):
                 wl = wordlists.get("dir", "")
                 if _wordlist_ok(wl, "dir", result.errors):
-                    jobs.append((disp, "dir",
+                    jobs.append((disp, "dir", p.number, host_header,
                                  lambda url=ip_url, wl=wl, p=p, insecure=insecure,
                                  hh=host_header, sfx=suffix: tools.gobuster_dir(
                                      url, wl,
@@ -250,7 +271,7 @@ def _run_web_stage(
                                      insecure=insecure, host_header=hh)))
 
             if toggles.get("whatweb", True):
-                jobs.append((disp, "whatweb",
+                jobs.append((disp, "whatweb", p.number, host_header,
                              lambda url=ip_url, p=p, hh=host_header, sfx=suffix:
                              tools.whatweb(
                                  url, run_dir / f"whatweb_{p.number}{sfx}.txt",
@@ -259,7 +280,7 @@ def _run_web_stage(
             if toggles.get("curl", True):
                 resolve = ((host_header, p.number, host) if host_header else None)
                 curl_url = disp if host_header else ip_url
-                jobs.append((disp, "curl",
+                jobs.append((disp, "curl", p.number, host_header,
                              lambda url=curl_url, p=p, insecure=insecure,
                              res=resolve, sfx=suffix: tools.curl_headers(
                                  url, run_dir / f"curl_{p.number}{sfx}.txt",
@@ -272,11 +293,15 @@ def _run_web_stage(
     console.print("\n[bold]▶ Web enumeration — gobuster / whatweb / curl "
                   "(parallel)[/bold]")
     with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as ex:
-        futures = {ex.submit(fn): (url, kind) for url, kind, fn in jobs}
+        futures = {ex.submit(fn): (url, kind, port, vhost)
+                   for url, kind, port, vhost, fn in jobs}
         for fut in as_completed(futures):
-            url, kind = futures[fut]
+            url, kind, port, vhost = futures[fut]
             res = fut.result()
             _record(res, result.errors)
             print_tool_block(console, f"{res.name} — {url}", res)
+            result.tool_runs.append(ToolRun(
+                name=res.name, title=url, result=res, kind=kind,
+                port=port, vhost=vhost))
             if kind in ("dir", "vhost", "dns"):
                 result.gobuster_hits[url] = tools.parse_gobuster_hits(res.stdout)
