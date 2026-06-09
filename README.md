@@ -37,13 +37,17 @@ python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 ```
 
-External tools (install separately; missing ones are skipped with a warning):
+Built for Linux (Debian/Kali, where these tools and the default
+`/usr/share/wordlists` paths live). External tools install separately; any
+missing one is skipped with a warning:
 
 ```bash
-brew install nmap gobuster ffuf whatweb exploitdb   # curl ships with macOS
+sudo apt install nmap gobuster ffuf whatweb exploitdb curl seclists
 ```
 
-(`exploitdb` provides `searchsploit`. `ffuf` is only needed if you enable it.)
+(`exploitdb` provides `searchsploit`; `seclists` provides the dns/vhost
+wordlists. On Kali most of these ship preinstalled. `ffuf` is only needed if you
+enable it.)
 
 ## Run
 
