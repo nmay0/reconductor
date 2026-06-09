@@ -35,6 +35,7 @@ DEFAULT_TOGGLES: dict[str, bool] = {
     "gobuster_vhost": False,
     "whatweb": True,
     "curl": True,
+    "nuclei": False,         # opt-in: heavy/noisy; enable via 'Modify run'
 }
 
 
@@ -46,6 +47,8 @@ class HostResult:
     gobuster_hits: dict[str, list[str]] = field(default_factory=dict)
     ffuf_hits: dict[str, list[str]] = field(default_factory=dict)
     exploits: list[dict] = field(default_factory=list)
+    # nuclei findings, flat across all web ports/vhosts (context on each record).
+    findings: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     # Every tool executed this run, in completion order, for report building.
     tool_runs: list[ToolRun] = field(default_factory=list)
@@ -196,9 +199,11 @@ def run_host(
     else:
         console.print("  [dim]No web ports detected; skipping web tools.[/dim]")
 
+    result.findings.sort(
+        key=lambda f: (tools.nuclei_severity_rank(f["severity"]), f["name"]))
     print_summary(console, host, run_dir, result.ports, result.gobuster_hits,
                   result.errors, ffuf_hits=result.ffuf_hits,
-                  exploits=result.exploits)
+                  exploits=result.exploits, findings=result.findings)
 
     # ---- Consolidated reports (formats chosen in config) -------------------
     document = report.build_document(
@@ -305,6 +310,13 @@ def _run_web_stage(
                                      extra=tflags.get("ffuf", ""),
                                      host_header=hh)))
 
+            if toggles.get("nuclei", False):
+                jobs.append((disp, "nuclei", p.number, host_header,
+                             lambda url=ip_url, p=p, hh=host_header, sfx=suffix:
+                             tools.nuclei(
+                                 url, run_dir / f"nuclei_{p.number}{sfx}.txt",
+                                 extra=tflags.get("nuclei", ""), host_header=hh)))
+
             if toggles.get("whatweb", True):
                 jobs.append((disp, "whatweb", p.number, host_header,
                              lambda url=ip_url, p=p, hh=host_header, sfx=suffix:
@@ -342,3 +354,7 @@ def _run_web_stage(
                 result.gobuster_hits[url] = tools.parse_gobuster_hits(res.stdout)
             elif kind == "ffuf":
                 result.ffuf_hits[url] = tools.parse_ffuf_hits(res.stdout)
+            elif kind == "nuclei":
+                for f in tools.parse_nuclei(res.grepable):
+                    result.findings.append(
+                        {**f, "port": port, "vhost": vhost, "url": url})

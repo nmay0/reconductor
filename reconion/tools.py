@@ -12,6 +12,7 @@ data and pull notable hits out of gobuster output.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -60,8 +61,9 @@ class ToolResult:
     artifact: Path | None = None
     skipped: bool = False
     error: str = ""
-    # nmap only: grepable output captured to a side file for parsing, kept
-    # separate from the human-readable report shown to the user.
+    # Secondary machine-parseable output captured to a side file (nmap grepable
+    # or nuclei JSONL), kept separate from the human-readable stdout shown to the
+    # user. Structured parsing reads from here, never from stdout.
     grepable: str = ""
 
     @property
@@ -81,7 +83,7 @@ class ToolRun:
     name: str
     title: str
     result: "ToolResult"
-    kind: str = ""              # scan | dir | vhost | dns | whatweb | curl
+    kind: str = ""  # scan | dir | ffuf | vhost | dns | whatweb | curl | searchsploit | nuclei
     port: int | None = None
     vhost: str | None = None
 
@@ -439,3 +441,85 @@ def parse_searchsploit(stdout: str) -> list[dict]:
             continue  # column header
         results.append({"title": title, "path": path})
     return results
+
+
+# --------------------------------------------------------------------------- #
+# Recon scanning — nuclei (template-based, detection + version CVEs only)
+# --------------------------------------------------------------------------- #
+
+# Severity ranking for sorting findings most-urgent first (unknown sorts last).
+NUCLEI_SEVERITY_ORDER = {
+    "critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4, "unknown": 5,
+}
+
+
+def nuclei_severity_rank(severity: str) -> int:
+    """Sort key for a nuclei severity (lower = more urgent)."""
+    return NUCLEI_SEVERITY_ORDER.get((severity or "unknown").lower(), 5)
+
+
+def nuclei(url: str, artifact: Path, *, extra: str,
+           host_header: str | None = None) -> ToolResult:
+    """Run nuclei against a single URL and capture its findings.
+
+    Human-readable findings go to stdout (shown live + saved to *artifact*); a
+    JSONL copy is exported to a side file and read into ToolResult.grepable for
+    structured parsing — the same human/structured split as the nmap wrappers.
+
+    Update checks are disabled so runs stay offline and deterministic: templates
+    must already be installed (run ``nuclei -update-templates`` out of band).
+    nuclei's HTTP client ignores TLS errors by default, so https needs no extra
+    flag. A Host header targets a virtual host on the same IP — the rootless
+    equivalent of an /etc/hosts entry. The recon-only template scope (detection
+    + version CVEs, nothing intrusive) lives in config tool_flags["nuclei"].
+    """
+    jsonl_path = artifact.with_suffix(".jsonl")
+    command = [
+        "nuclei", "-target", url,
+        "-jsonl-export", str(jsonl_path),
+        "-disable-update-check", "-no-color",
+    ]
+    if host_header:
+        command += ["-H", f"Host: {host_header}"]
+    command += flag_list(extra)
+    result = _run("nuclei", command, artifact)
+    try:
+        result.grepable = jsonl_path.read_text(encoding="utf-8")
+    except OSError:
+        result.grepable = ""  # no findings -> nuclei writes no export file
+    return result
+
+
+def parse_nuclei(jsonl: str) -> list[dict]:
+    """Parse nuclei's JSONL export into severity-sorted finding records.
+
+    Each line is one JSON finding; malformed/blank lines are skipped. Returns
+    {template_id, name, severity, matched_at, tags, type} dicts, most-urgent
+    first.
+    """
+    findings: list[dict] = []
+    for line in jsonl.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        info = obj.get("info")
+        info = info if isinstance(info, dict) else {}
+        tags = info.get("tags") or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        findings.append({
+            "template_id": obj.get("template-id") or "",
+            "name": (info.get("name") or "").strip(),
+            "severity": (info.get("severity") or "unknown").strip().lower(),
+            "matched_at": (obj.get("matched-at") or obj.get("host") or "").strip(),
+            "tags": list(tags),
+            "type": (obj.get("type") or "").strip(),
+        })
+    findings.sort(key=lambda f: (nuclei_severity_rank(f["severity"]), f["name"]))
+    return findings

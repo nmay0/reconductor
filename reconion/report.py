@@ -23,8 +23,10 @@ from xml.etree import ElementTree as ET
 from .tools import (
     GOBUSTER_INTERESTING,
     ToolRun,
+    nuclei_severity_rank,
     parse_ffuf_structured,
     parse_gobuster_hits,
+    parse_nuclei,
     parse_searchsploit,
 )
 
@@ -136,6 +138,7 @@ def build_document(
     web_map: dict[tuple[int | None, str | None], dict[str, Any]] = {}
     discovery: dict[str, list[str]] = {"vhost": [], "dns": []}
     exploits: list[dict[str, str]] = []
+    findings: list[dict[str, Any]] = []
     for tr in tool_runs:
         out = tr.result.stdout or ""
         if tr.kind in ("dir", "ffuf", "whatweb", "curl"):
@@ -161,6 +164,13 @@ def build_document(
             discovery["dns"] = parse_gobuster_hits(out)
         elif tr.kind == "searchsploit":
             exploits = parse_searchsploit(out)
+        elif tr.kind == "nuclei":
+            # nuclei's JSONL lands in .grepable (not stdout); tag each finding
+            # with the web context it came from for the dedicated section.
+            for f in parse_nuclei(tr.result.grepable or ""):
+                findings.append({**f, "port": tr.port, "vhost": tr.vhost,
+                                 "url": tr.title})
+    findings.sort(key=lambda f: (nuclei_severity_rank(f["severity"]), f["name"]))
 
     # Per-tool evidence files already in the run dir (reports not yet written).
     artifacts = sorted(
@@ -186,6 +196,7 @@ def build_document(
         "web": list(web_map.values()),
         "discovery": discovery,
         "exploits": exploits,
+        "findings": findings,
         "warnings": list(warnings),
         "artifacts": artifacts,
     }
@@ -197,6 +208,23 @@ def build_document(
 
 def _fmt_duration(seconds: float) -> str:
     return f"{seconds:.1f}s"
+
+
+_SEVERITY_DISPLAY_ORDER = ["critical", "high", "medium", "low", "info", "unknown"]
+
+
+def _severity_counts(findings: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for f in findings:
+        sev = f.get("severity", "unknown")
+        counts[sev] = counts.get(sev, 0) + 1
+    return counts
+
+
+def _severity_line(counts: dict[str, int]) -> str:
+    """One-line severity breakdown, e.g. 'critical: 1  high: 3  medium: 2'."""
+    return "  ".join(f"{s}: {counts[s]}" for s in _SEVERITY_DISPLAY_ORDER
+                     if counts.get(s))
 
 
 def _render_summary_text(doc: dict[str, Any]) -> str:
@@ -254,6 +282,21 @@ def _render_summary_text(doc: dict[str, Any]) -> str:
                 for hit in ffuf_hits:
                     size = "" if hit["size"] is None else f"  size={hit['size']}"
                     lines.append(f"      {hit['status']}  {hit['path']}{size}")
+        lines.append("")
+
+    findings = doc.get("findings", [])
+    if findings:
+        lines.append(f"Vulnerabilities — nuclei ({len(findings)})")
+        summ = _severity_line(_severity_counts(findings))
+        if summ:
+            lines.append(f"  {summ}")
+        for f in findings:
+            name = f.get("name") or f.get("template_id") or "(finding)"
+            lines.append(f"  [{f['severity'].upper()}] {name}")
+            loc = f.get("matched_at") or f.get("url") or ""
+            tid = f"  [{f['template_id']}]" if f.get("template_id") else ""
+            if loc or tid:
+                lines.append(f"    {loc}{tid}".rstrip())
         lines.append("")
 
     exploits = doc.get("exploits", [])
@@ -363,6 +406,26 @@ def _render_markdown(doc: dict[str, Any]) -> str:
                     )
             lines.append("")
 
+    findings = doc.get("findings", [])
+    if findings:
+        lines.append("## Vulnerabilities (nuclei)")
+        lines.append("")
+        summ = _severity_line(_severity_counts(findings))
+        if summ:
+            lines.append(f"_{summ}_")
+            lines.append("")
+        lines.append("| Severity | Finding | Location | Template | Context |")
+        lines.append("|---|---|---|---|---|")
+        for f in findings:
+            loc = f.get("matched_at") or f.get("url") or ""
+            ctx = f.get("vhost") or (f"port {f['port']}" if f.get("port") else "")
+            lines.append(
+                f"| {f['severity']} | {_md_escape(f.get('name') or '')} | "
+                f"{_md_escape(loc)} | {_md_escape(f.get('template_id') or '')} | "
+                f"{_md_escape(ctx)} |"
+            )
+        lines.append("")
+
     exploits = doc.get("exploits", [])
     if exploits:
         lines.append("## Exploits (searchsploit)")
@@ -468,6 +531,20 @@ def _render_xml(doc: dict[str, Any]) -> str:
     for ex in doc.get("exploits", []):
         ET.SubElement(exploits_el, "exploit",
                       {"title": ex["title"], "path": ex["path"]})
+
+    findings_el = ET.SubElement(root, "findings")
+    for f in doc.get("findings", []):
+        fel = ET.SubElement(findings_el, "finding", {
+            "severity": f.get("severity", ""),
+            "templateId": f.get("template_id", ""),
+            "type": f.get("type", ""),
+            "port": "" if f.get("port") is None else str(f["port"]),
+            "vhost": f.get("vhost") or ""})
+        _sub(fel, "name", f.get("name", ""))
+        _sub(fel, "matchedAt", f.get("matched_at", ""))
+        tags_el = ET.SubElement(fel, "tags")
+        for t in f.get("tags", []):
+            _sub(tags_el, "tag", t)
 
     disc = doc.get("discovery", {})
     disc_el = ET.SubElement(root, "discovery")

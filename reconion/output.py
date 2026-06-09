@@ -56,6 +56,7 @@ def print_summary(
     errors: list[str],
     ffuf_hits: dict[str, list[str]] | None = None,
     exploits: list[dict] | None = None,
+    findings: list[dict] | None = None,
 ) -> None:
     """Print the per-host wrap-up: open ports, services, notable hits, exploits."""
     console.print()
@@ -97,6 +98,25 @@ def print_summary(
             table.add_row(hit)
         if len(hits) > 40:
             table.add_row(f"... and {len(hits) - 40} more (see artifact)")
+        console.print(table)
+
+    findings = findings or []
+    if findings:
+        sev_style = {"critical": "bold red", "high": "red", "medium": "yellow",
+                     "low": "cyan", "info": "dim"}
+        table = Table(title="nuclei — findings (most urgent first)",
+                      title_style="bold red", header_style="bold")
+        table.add_column("Severity")
+        table.add_column("Finding", overflow="fold")
+        table.add_column("Location", overflow="fold", style="dim")
+        for f in findings[:40]:
+            sev = f.get("severity", "unknown")
+            style = sev_style.get(sev, "white")
+            table.add_row(f"[{style}]{sev}[/{style}]",
+                          f.get("name") or f.get("template_id", ""),
+                          f.get("matched_at") or f.get("url", ""))
+        if len(findings) > 40:
+            table.add_row("", f"... and {len(findings) - 40} more (see artifact)", "")
         console.print(table)
 
     exploits = exploits or []

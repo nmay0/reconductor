@@ -39,6 +39,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "whatweb": "",
         "curl": "",
         "searchsploit": "",
+        # nuclei runs detection + version-CVE templates only: exclude every tag
+        # that *acts* on the target so the tool stays pure recon. Tune the tags
+        # here to widen/narrow scope.
+        "nuclei": "-exclude-tags fuzz,dos,brute-force,intrusive,default-login",
     },
     # Consolidated reports emitted at the end of each host run (in addition to
     # the always-written per-tool artifacts). Keys must match report.REPORT_FORMATS.

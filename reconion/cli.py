@@ -316,6 +316,7 @@ EDITABLE_FIELDS: list[tuple[str, list[str]]] = [
     ("extra flags: whatweb", ["tool_flags", "whatweb"]),
     ("extra flags: curl", ["tool_flags", "curl"]),
     ("extra flags: searchsploit", ["tool_flags", "searchsploit"]),
+    ("extra flags: nuclei", ["tool_flags", "nuclei"]),
 ]
 
 
