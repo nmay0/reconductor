@@ -32,6 +32,9 @@ configured (config + tool toggles) and run **one at a time**.
 
 ## Install
 
+`./reconion.sh` sets up the virtualenv and launches in one step (see
+[Run](#run)). To manage the venv by hand instead:
+
 ```bash
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
@@ -50,6 +53,15 @@ wordlists. On Kali most of these ship preinstalled. `ffuf` is only needed if you
 enable it.)
 
 ## Run
+
+```bash
+./reconion.sh
+```
+
+`reconion.sh` (re)creates `.venv`, installs `requirements.txt`, then launches
+recon onion. Run it from the repo root; it's safe to re-run (the venv and deps
+are reused). If the virtualenv is already set up, you can launch directly
+instead:
 
 ```bash
 ./.venv/bin/python -m reconion
