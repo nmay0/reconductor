@@ -21,8 +21,10 @@ from typing import Any
 from xml.etree import ElementTree as ET
 
 from .tools import (
+    DIG_RECORD_TYPES,
     GOBUSTER_INTERESTING,
     ToolRun,
+    build_dns_map,
     nuclei_severity_rank,
     parse_ffuf_structured,
     parse_gobuster_hits,
@@ -193,6 +195,9 @@ def build_document(
             "wordlists": dict(config.get("wordlists", {})),
         },
         "ports": ports_doc,
+        # DNS fingerprint, re-parsed from the whois/dig/axfr runs (same dual-parse
+        # the pipeline does for its live map).
+        "dns": build_dns_map(host, domain, tool_runs),
         "web": list(web_map.values()),
         "discovery": discovery,
         "exploits": exploits,
@@ -208,6 +213,18 @@ def build_document(
 
 def _fmt_duration(seconds: float) -> str:
     return f"{seconds:.1f}s"
+
+
+def _dns_has_data(dns: dict[str, Any]) -> bool:
+    return bool(dns and any(dns.get(k) for k in
+                ("ip_whois", "domain_whois", "records", "ptr", "axfr")))
+
+
+def _ordered_records(records: dict[str, list[str]]) -> list[tuple[str, list[str]]]:
+    """Record (type, values) pairs in canonical order, extras appended."""
+    ordered = [(t, records[t]) for t in DIG_RECORD_TYPES if records.get(t)]
+    ordered += [(t, v) for t, v in records.items() if t not in DIG_RECORD_TYPES and v]
+    return ordered
 
 
 _SEVERITY_DISPLAY_ORDER = ["critical", "high", "medium", "low", "info", "unknown"]
@@ -252,6 +269,31 @@ def _render_summary_text(doc: dict[str, Any]) -> str:
     else:
         lines.append("  none")
     lines.append("")
+
+    dns = doc.get("dns") or {}
+    if _dns_has_data(dns):
+        lines.append("DNS")
+        for title, whois in (("whois (IP)", dns.get("ip_whois")),
+                             ("whois (domain)", dns.get("domain_whois"))):
+            if whois:
+                lines.append(f"  {title}")
+                for key, val in whois.items():
+                    lines.append(f"    {key}: {val}")
+        records = dns.get("records") or {}
+        if records:
+            lines.append("  Records")
+            for rtype, vals in _ordered_records(records):
+                lines.append(f"    {rtype}: {', '.join(vals)}")
+        ptr = dns.get("ptr") or []
+        if ptr:
+            lines.append(f"  Reverse PTR: {', '.join(ptr)}")
+        axfr = dns.get("axfr") or {}
+        if axfr:
+            lines.append("  Zone transfer (AXFR)")
+            for ns, status in axfr.items():
+                note = "  <-- zone exposed" if status == "OPEN" else ""
+                lines.append(f"    {ns}: {status}{note}")
+        lines.append("")
 
     web = doc["web"]
     if web:
@@ -365,6 +407,38 @@ def _render_markdown(doc: dict[str, Any]) -> str:
     else:
         lines.append("_No open ports found._")
     lines.append("")
+
+    dns = doc.get("dns") or {}
+    if _dns_has_data(dns):
+        lines.append("## DNS")
+        lines.append("")
+        for title, whois in (("whois (IP)", dns.get("ip_whois")),
+                             ("whois (domain)", dns.get("domain_whois"))):
+            if whois:
+                lines.append(f"**{title}**")
+                lines.append("")
+                for key, val in whois.items():
+                    lines.append(f"- {key}: {_md_escape(val)}")
+                lines.append("")
+        records = dns.get("records") or {}
+        if records:
+            lines.append("| Type | Records |")
+            lines.append("|---|---|")
+            for rtype, vals in _ordered_records(records):
+                lines.append(f"| {rtype} | {_md_escape(', '.join(vals))} |")
+            lines.append("")
+        ptr = dns.get("ptr") or []
+        if ptr:
+            lines.append(f"- **Reverse PTR:** {_md_escape(', '.join(ptr))}")
+            lines.append("")
+        axfr = dns.get("axfr") or {}
+        if axfr:
+            lines.append("**Zone transfer (AXFR)**")
+            lines.append("")
+            for ns, status in axfr.items():
+                note = " — zone exposed" if status == "OPEN" else ""
+                lines.append(f"- {_md_escape(ns)}: {status}{note}")
+            lines.append("")
 
     web = doc["web"]
     if web:
@@ -501,6 +575,27 @@ def _render_xml(doc: dict[str, Any]) -> str:
             "web": str(p["web"]).lower(), "https": str(p["https"]).lower()})
         _sub(port_el, "service", p["service"] or "")
         _sub(port_el, "version", p["version"] or "")
+
+    dns = doc.get("dns") or {}
+    dns_el = ET.SubElement(root, "dns", {
+        "target": dns.get("target") or doc["target"],
+        "domain": dns.get("domain") or ""})
+    ipw_el = ET.SubElement(dns_el, "ipWhois")
+    for key, val in (dns.get("ip_whois") or {}).items():
+        _sub(ipw_el, "field", val, name=key)
+    dw_el = ET.SubElement(dns_el, "domainWhois")
+    for key, val in (dns.get("domain_whois") or {}).items():
+        _sub(dw_el, "field", val, name=key)
+    recs_el = ET.SubElement(dns_el, "records")
+    for rtype, vals in _ordered_records(dns.get("records") or {}):
+        for val in vals:
+            _sub(recs_el, "record", val, type=rtype)
+    rev_el = ET.SubElement(dns_el, "reverse")
+    for ptr in (dns.get("ptr") or []):
+        _sub(rev_el, "ptr", ptr)
+    axfr_el = ET.SubElement(dns_el, "zoneTransfer")
+    for ns, status in (dns.get("axfr") or {}).items():
+        ET.SubElement(axfr_el, "nameserver", {"name": ns, "status": status})
 
     web_el = ET.SubElement(root, "web")
     for w in doc["web"]:

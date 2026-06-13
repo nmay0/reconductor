@@ -26,6 +26,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     # nmap timing template applied to every nmap stage.
     "nmap_timing": "-T4",
+    # DNS infrastructure fingerprinting (whois + dig), run alongside the port
+    # scan. record_types is the space-separated list dig queries for the domain;
+    # a reverse PTR for the target IP and an AXFR attempt per discovered NS are
+    # always included when the dig stage runs.
+    "dns": {
+        "record_types": "A AAAA NS SOA MX TXT CNAME",
+    },
     # Root output directory; runs land under <output_dir>/<host>/<timestamp>/.
     "output_dir": "./recon",
     # Extra flags appended per tool/stage (a single string each, split on spaces).
@@ -34,6 +41,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "nmap_quick": "",
         "nmap_full": "",
         "nmap_service": "",
+        "whois": "",
+        "dig": "",
         "gobuster": "",
         "ffuf": "",
         "whatweb": "",

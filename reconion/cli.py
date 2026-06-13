@@ -26,7 +26,8 @@ from .report import REPORT_FORMATS
 
 # Tools checked at startup. ffuf is omitted on purpose: it's opt-in (off by
 # default), so its absence is only reported if a run actually enables it.
-REQUIRED_TOOLS = ["nmap", "gobuster", "whatweb", "curl", "searchsploit"]
+REQUIRED_TOOLS = ["nmap", "whois", "dig", "gobuster", "whatweb", "curl",
+                  "searchsploit"]
 
 
 class Session:
@@ -137,11 +138,17 @@ def edit_output_formats(console: Console,
 
 def _maybe_domain(console: Console, toggles: dict[str, bool],
                   current: str | None) -> str | None:
-    """If a gobuster mode needing a domain is on, prompt for one."""
-    if toggles.get("gobuster_dns") or toggles.get("gobuster_vhost"):
+    """Prompt for a domain when a stage can use one (DNS recon / gobuster modes).
+
+    The dig stage works on the bare IP (reverse PTR) without a domain, but a
+    domain unlocks the forward records, domain whois and the AXFR attempt;
+    gobuster dns/vhost require one outright.
+    """
+    if (toggles.get("dig") or toggles.get("gobuster_dns")
+            or toggles.get("gobuster_vhost")):
         dflt = current or ""
         val = Prompt.ask(
-            "Domain for gobuster dns/vhost (blank to skip those modes)",
+            "Domain for DNS recon / gobuster dns/vhost (blank to skip)",
             default=dflt,
         ).strip()
         return val or None
@@ -303,6 +310,7 @@ def _get_nested(cfg: dict[str, Any], path: list[str]) -> Any:
 EDITABLE_FIELDS: list[tuple[str, list[str]]] = [
     ("nmap timing flag", ["nmap_timing"]),
     ("output directory", ["output_dir"]),
+    ("dns record types", ["dns", "record_types"]),
     ("wordlist: dir", ["wordlists", "dir"]),
     ("wordlist: dns", ["wordlists", "dns"]),
     ("wordlist: vhost", ["wordlists", "vhost"]),
@@ -311,6 +319,8 @@ EDITABLE_FIELDS: list[tuple[str, list[str]]] = [
     ("extra flags: nmap_quick", ["tool_flags", "nmap_quick"]),
     ("extra flags: nmap_full", ["tool_flags", "nmap_full"]),
     ("extra flags: nmap_service", ["tool_flags", "nmap_service"]),
+    ("extra flags: whois", ["tool_flags", "whois"]),
+    ("extra flags: dig", ["tool_flags", "dig"]),
     ("extra flags: gobuster", ["tool_flags", "gobuster"]),
     ("extra flags: ffuf", ["tool_flags", "ffuf"]),
     ("extra flags: whatweb", ["tool_flags", "whatweb"]),

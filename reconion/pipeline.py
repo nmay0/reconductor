@@ -28,6 +28,8 @@ DEFAULT_TOGGLES: dict[str, bool] = {
     "nmap_quick": True,
     "nmap_full": True,
     "nmap_service": True,
+    "whois": True,
+    "dig": True,
     "searchsploit": True,
     "gobuster_dir": True,
     "ffuf": False,           # opt-in: enable manually via 'Modify run'
@@ -102,35 +104,55 @@ def run_host(
     console.rule(f"[bold cyan]Recon — {host}[/bold cyan]")
     console.print(f"[dim]Output: {run_dir}[/dim]")
 
-    # ---- Stages 1 & 2: quick + full in parallel ----------------------------
+    # ---- Stage 1: initial recon — port scan + DNS, all in parallel ---------
+    # nmap quick/full and the DNS fingerprint (whois + dig) have no dependency
+    # on each other, so they run together as the opening recon burst. Each job
+    # is (name, kind, title, callable); the kind routes how its result is used.
     quick_ports: list[Port] = []
     full_ports: list[Port] = []
-    scan_jobs: list[tuple[str, Callable[[], ToolResult]]] = []
+    record_types = (config.get("dns", {}).get("record_types") or "").split()
+    init_jobs: list[tuple[str, str, str, Callable[[], ToolResult]]] = []
     if toggles.get("nmap_quick", True):
-        scan_jobs.append(("nmap_quick", lambda: tools.nmap_quick(
-            host, run_dir / "nmap_quick.txt", timing=timing,
-            extra=tflags.get("nmap_quick", ""))))
+        init_jobs.append(("nmap_quick", "scan", "nmap_quick", lambda:
+            tools.nmap_quick(host, run_dir / "nmap_quick.txt", timing=timing,
+                             extra=tflags.get("nmap_quick", ""))))
     if toggles.get("nmap_full", True):
-        scan_jobs.append(("nmap_full", lambda: tools.nmap_full(
-            host, run_dir / "nmap_full.txt", timing=timing,
-            extra=tflags.get("nmap_full", ""))))
+        init_jobs.append(("nmap_full", "scan", "nmap_full", lambda:
+            tools.nmap_full(host, run_dir / "nmap_full.txt", timing=timing,
+                            extra=tflags.get("nmap_full", ""))))
+    if toggles.get("whois", True):
+        init_jobs.append(("whois", "whois", host, lambda ip=host:
+            tools.whois_lookup(ip, run_dir / "whois_ip.txt",
+                               extra=tflags.get("whois", ""))))
+        if domain:
+            init_jobs.append(("whois", "whois", domain, lambda d=domain:
+                tools.whois_lookup(d, run_dir / f"whois_{_slug(d)}.txt",
+                                   extra=tflags.get("whois", ""))))
+    if toggles.get("dig", True):
+        init_jobs.append(("dig", "dig", domain or host,
+            lambda d=domain, ip=host, rt=record_types: tools.dig_records(
+                d, ip, run_dir / "dig.txt", types=rt,
+                extra=tflags.get("dig", ""))))
 
-    if scan_jobs:
-        console.print("\n[bold]▶ Port scan — quick + full (parallel)[/bold]")
-        with ThreadPoolExecutor(max_workers=len(scan_jobs)) as ex:
-            futures = {ex.submit(fn): name for name, fn in scan_jobs}
+    if init_jobs:
+        console.print("\n[bold]▶ Initial recon — port scan + DNS (parallel)[/bold]")
+        with ThreadPoolExecutor(max_workers=len(init_jobs)) as ex:
+            futures = {ex.submit(fn): (name, kind, title)
+                       for name, kind, title, fn in init_jobs}
             for fut in as_completed(futures):
-                name = futures[fut]
+                name, kind, title = futures[fut]
                 res = fut.result()
                 _record(res, result.errors)
-                print_tool_block(console, name, res)
+                disp = name if kind == "scan" else f"{name} — {title}"
+                print_tool_block(console, disp, res)
                 result.tool_runs.append(
-                    ToolRun(name=name, title=name, result=res, kind="scan"))
-                found = tools.parse_grepable_ports(res.grepable)
-                if name == "nmap_quick":
-                    quick_ports = found
-                else:
-                    full_ports = found
+                    ToolRun(name=name, title=title, result=res, kind=kind))
+                if kind == "scan":
+                    found = tools.parse_grepable_ports(res.grepable)
+                    if name == "nmap_quick":
+                        quick_ports = found
+                    else:
+                        full_ports = found
 
     merged = _merge_ports(quick_ports, full_ports)
     open_ports = sorted(merged.values(), key=lambda p: p.number)
@@ -139,6 +161,20 @@ def run_host(
             "  Open ports: "
             + ", ".join(str(p.number) for p in open_ports)
         )
+
+    # ---- Stage 1b: DNS zone transfer (AXFR) against discovered nameservers --
+    # Depends on the NS records from the dig stage above, so it follows it.
+    if toggles.get("dig", True) and domain:
+        ns_hosts = tools.ns_hostnames(
+            tools.build_dns_map(host, domain, result.tool_runs)["records"])
+        if ns_hosts:
+            console.print("\n[bold]▶ DNS zone transfer — AXFR[/bold]")
+            res = tools.dig_axfr(domain, ns_hosts, run_dir / "dig_axfr.txt",
+                                 extra=tflags.get("dig", ""))
+            _record(res, result.errors)
+            print_tool_block(console, f"dig_axfr — {domain}", res)
+            result.tool_runs.append(ToolRun(
+                name="dig_axfr", title=domain, result=res, kind="axfr"))
 
     # ---- Stage 3: service/version/script scan ------------------------------
     service_xml = run_dir / "nmap_service.xml"
@@ -201,9 +237,11 @@ def run_host(
 
     result.findings.sort(
         key=lambda f: (tools.nuclei_severity_rank(f["severity"]), f["name"]))
+    dns_map = tools.build_dns_map(host, domain, result.tool_runs)
     print_summary(console, host, run_dir, result.ports, result.gobuster_hits,
                   result.errors, ffuf_hits=result.ffuf_hits,
-                  exploits=result.exploits, findings=result.findings)
+                  exploits=result.exploits, findings=result.findings,
+                  dns_map=dns_map)
 
     # ---- Consolidated reports (formats chosen in config) -------------------
     document = report.build_document(

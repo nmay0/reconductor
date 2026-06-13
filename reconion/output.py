@@ -9,8 +9,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.tree import Tree
 
-from .tools import Port, ToolResult
+from .tools import DIG_RECORD_TYPES, Port, ToolResult
 
 
 def print_tool_block(console: Console, title: str, result: ToolResult) -> None:
@@ -47,6 +48,47 @@ def make_run_dir(output_dir: str, host: str) -> Path:
     return run_dir
 
 
+def _dns_map_tree(dns_map: dict) -> Tree | None:
+    """Build a rich Tree of the DNS fingerprint, or None when nothing was found."""
+    if not dns_map or not any(
+        dns_map.get(k) for k in
+        ("ip_whois", "domain_whois", "records", "ptr", "axfr")
+    ):
+        return None
+
+    label = dns_map.get("domain") or dns_map.get("target") or ""
+    root = Tree(f"[bold cyan]DNS map — {label}[/bold cyan]")
+
+    for title, whois in (("whois (IP)", dns_map.get("ip_whois")),
+                         ("whois (domain)", dns_map.get("domain_whois"))):
+        if whois:
+            branch = root.add(f"[bold]{title}[/bold]")
+            for key, val in whois.items():
+                branch.add(f"{key}: {val}")
+
+    records = dns_map.get("records") or {}
+    if records:
+        branch = root.add("[bold]Records[/bold]")
+        ordered = ([t for t in DIG_RECORD_TYPES if records.get(t)]
+                   + [t for t in records if t not in DIG_RECORD_TYPES])
+        for rtype in ordered:
+            branch.add(f"{rtype}: " + ", ".join(records[rtype]))
+
+    ptr = dns_map.get("ptr") or []
+    if ptr:
+        root.add(f"[bold]Reverse PTR[/bold]: " + ", ".join(ptr))
+
+    axfr = dns_map.get("axfr") or {}
+    if axfr:
+        branch = root.add("[bold]Zone transfer (AXFR)[/bold]")
+        for ns, status in axfr.items():
+            if status == "OPEN":
+                branch.add(f"[bold red]{ns}: OPEN — zone exposed[/bold red]")
+            else:
+                branch.add(f"[dim]{ns}: {status}[/dim]")
+    return root
+
+
 def print_summary(
     console: Console,
     host: str,
@@ -57,6 +99,7 @@ def print_summary(
     ffuf_hits: dict[str, list[str]] | None = None,
     exploits: list[dict] | None = None,
     findings: list[dict] | None = None,
+    dns_map: dict | None = None,
 ) -> None:
     """Print the per-host wrap-up: open ports, services, notable hits, exploits."""
     console.print()
@@ -74,6 +117,10 @@ def print_summary(
         console.print(table)
     else:
         console.print("[yellow]No open ports found.[/yellow]")
+
+    dns_tree = _dns_map_tree(dns_map or {})
+    if dns_tree is not None:
+        console.print(dns_tree)
 
     notable = {url: hits for url, hits in gobuster_hits.items() if hits}
     if notable:

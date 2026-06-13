@@ -83,7 +83,7 @@ class ToolRun:
     name: str
     title: str
     result: "ToolResult"
-    kind: str = ""  # scan | dir | ffuf | vhost | dns | whatweb | curl | searchsploit | nuclei
+    kind: str = ""  # scan | whois | dig | axfr | dir | ffuf | vhost | dns | whatweb | curl | searchsploit | nuclei
     port: int | None = None
     vhost: str | None = None
 
@@ -269,6 +269,213 @@ def parse_grepable_ports(stdout: str) -> list[Port]:
         if existing is None or (not existing.service and p.service):
             best[p.number] = p
     return [best[n] for n in sorted(best)]
+
+
+# --------------------------------------------------------------------------- #
+# DNS infrastructure fingerprinting — whois + dig
+# --------------------------------------------------------------------------- #
+
+# Forward record types queried by dig_records (PTR comes from the -x reverse
+# query). Also the canonical display order for the DNS map.
+DIG_RECORD_TYPES = ["A", "AAAA", "NS", "SOA", "MX", "TXT", "CNAME"]
+
+
+def whois_lookup(target: str, artifact: Path, *, extra: str) -> ToolResult:
+    """Whois for an IP (netblock / org / abuse) or a domain (registrar / NS)."""
+    command = ["whois", *flag_list(extra), target]
+    return _run("whois", command, artifact, timeout=30)
+
+
+def dig_records(domain: str | None, ip: str | None, artifact: Path, *,
+                types: list[str], extra: str) -> ToolResult:
+    """Forward DNS records for *domain* plus a reverse PTR for *ip*, one dig call.
+
+    ``+noall +answer`` keeps only the answer-section records on stdout, parsed by
+    parse_dig_answers and bucketed by record type (the PTR lands under "PTR").
+    """
+    command = ["dig", "+noall", "+answer", "+time=5", "+tries=2"]
+    if domain:
+        for t in (types or DIG_RECORD_TYPES):
+            command += [domain, t]
+    if ip:
+        command += ["-x", ip]
+    command += flag_list(extra)
+    return _run("dig", command, artifact, timeout=30)
+
+
+def dig_axfr(domain: str, nameservers: list[str], artifact: Path, *,
+             extra: str) -> ToolResult:
+    """Attempt a zone transfer (AXFR) of *domain* against each nameserver.
+
+    A successful transfer means a misconfigured DNS server is exposing the whole
+    zone — a recon *finding*, not an action (AXFR is a read-only query). Per-NS
+    results are aggregated into one human-readable artifact, with the status
+    encoded in a header line per NS so the live map and the report can both
+    re-parse it (parse_axfr).
+    """
+    if not tool_available("dig"):
+        return ToolResult(name="dig_axfr", command=["dig", "axfr"],
+                          skipped=True, error="dig not installed")
+    blocks: list[str] = []
+    for ns in nameservers:
+        command = ["dig", "+noall", "+answer", "+time=5", "+tries=1",
+                   "axfr", domain, f"@{ns}", *flag_list(extra)]
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True,
+                                  timeout=30)
+            out = (proc.stdout or "").strip()
+        except (subprocess.TimeoutExpired, OSError) as exc:  # pragma: no cover
+            out = f"; transfer failed: {exc}"
+        answers = [ln for ln in out.splitlines()
+                   if ln.strip() and not ln.startswith(";")]
+        status = "OPEN" if answers else "REFUSED"
+        blocks.append(f"=== AXFR {domain} @{ns} [{status}] ===\n{out or '(no data)'}")
+    text = "\n\n".join(blocks)
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(text + "\n", encoding="utf-8")
+    return ToolResult(name="dig_axfr", command=["dig", "axfr", domain],
+                      returncode=0, stdout=text, artifact=artifact)
+
+
+# whois field extraction: (display label, candidate keys [first match wins],
+# multi-valued?). Keys are matched case-insensitively against the exact text
+# before the first ":" on each line, so domain fields (e.g. "registrant
+# organization") don't collide with IP fields (e.g. "organization").
+_WHOIS_FIELDS: list[tuple[str, list[str], bool]] = [
+    ("NetRange", ["netrange", "inetnum"], False),
+    ("CIDR", ["cidr", "route"], False),
+    ("NetName", ["netname"], False),
+    ("Org", ["org-name", "orgname", "organization", "organisation", "descr"], False),
+    ("Country", ["country"], False),
+    ("Origin AS", ["originas", "origin"], False),
+    ("Abuse", ["orgabuseemail", "abuse-mailbox"], False),
+    ("Registrar", ["registrar"], False),
+    ("Registrant", ["registrant organization", "registrant org", "registrant"], False),
+    ("Created", ["creation date", "created"], False),
+    ("Updated", ["updated date"], False),
+    ("Expires", ["registry expiry date", "registrar registration expiration date",
+                 "expiration date", "paid-till"], False),
+    ("Name servers", ["name server", "nserver"], True),
+    ("DNSSEC", ["dnssec"], False),
+]
+
+
+def parse_whois(text: str) -> dict[str, str]:
+    """Pull a curated set of high-signal fields out of whois output (IP or domain).
+
+    whois formats vary by RIR / registrar, so we gather every ``key: value`` line
+    (case-insensitively) and select the fields in _WHOIS_FIELDS. Only fields that
+    are actually present are returned, in _WHOIS_FIELDS order for stable display.
+    """
+    collected: dict[str, list[str]] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line[0] in "%#*>" or ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key, val = key.strip().lower(), val.strip()
+        if key and val:
+            collected.setdefault(key, []).append(val)
+
+    out: dict[str, str] = {}
+    for label, keys, multi in _WHOIS_FIELDS:
+        values: list[str] = next((collected[k] for k in keys if k in collected), [])
+        if not values:
+            continue
+        if multi:
+            deduped: list[str] = []
+            for v in values:
+                if v not in deduped:
+                    deduped.append(v)
+            out[label] = ", ".join(deduped)
+        else:
+            out[label] = values[0]
+    return out
+
+
+def parse_dig_answers(text: str) -> dict[str, list[str]]:
+    """Bucket dig ``+answer`` lines by record type, preserving order, de-duped.
+
+    Each answer line is ``name  ttl  IN  TYPE  value``; we key on TYPE and keep
+    the value (which, for SOA/MX, includes the priority / serial fields).
+    """
+    records: dict[str, list[str]] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(";"):
+            continue
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            continue
+        rtype, value = parts[3], parts[4].strip()
+        bucket = records.setdefault(rtype, [])
+        if value not in bucket:
+            bucket.append(value)
+    return records
+
+
+def parse_axfr(text: str) -> dict[str, str]:
+    """Map nameserver -> AXFR status (OPEN / REFUSED) from dig_axfr's headers."""
+    statuses: dict[str, str] = {}
+    for line in text.splitlines():
+        if line.startswith("=== AXFR") and "@" in line and "[" in line:
+            ns = line.split("@", 1)[1].split()[0]
+            status = line.split("[", 1)[1].split("]", 1)[0].strip()
+            statuses[ns] = status
+    return statuses
+
+
+def build_dns_map(host: str, domain: str | None,
+                  tool_runs: list["ToolRun"]) -> dict:
+    """Assemble the consolidated DNS map from the whois / dig / axfr tool runs.
+
+    Shared by the live summary (output.py) and the report (report.py) so both
+    render the same structure — the dual-parse pattern used for nuclei findings.
+    The whois run whose title matches *host* is the IP lookup; any other is the
+    domain lookup.
+    """
+    ip_whois: dict[str, str] = {}
+    domain_whois: dict[str, str] = {}
+    records: dict[str, list[str]] = {}
+    axfr: dict[str, str] = {}
+    for tr in tool_runs:
+        out = tr.result.stdout or ""
+        if tr.kind == "whois":
+            parsed = parse_whois(out)
+            if not parsed:
+                continue
+            if tr.title == host:
+                ip_whois = parsed
+            else:
+                domain_whois = parsed
+        elif tr.kind == "dig":
+            for rtype, vals in parse_dig_answers(out).items():
+                bucket = records.setdefault(rtype, [])
+                for v in vals:
+                    if v not in bucket:
+                        bucket.append(v)
+        elif tr.kind == "axfr":
+            axfr.update(parse_axfr(out))
+    ptr = records.pop("PTR", [])
+    return {
+        "target": host,
+        "domain": domain,
+        "ip_whois": ip_whois,
+        "domain_whois": domain_whois,
+        "records": records,
+        "ptr": ptr,
+        "axfr": axfr,
+    }
+
+
+def ns_hostnames(records: dict[str, list[str]]) -> list[str]:
+    """Nameserver hostnames (trailing dot stripped, de-duped) from NS records."""
+    hosts: list[str] = []
+    for v in records.get("NS", []):
+        h = v.strip().rstrip(".")
+        if h and h not in hosts:
+            hosts.append(h)
+    return hosts
 
 
 # --------------------------------------------------------------------------- #
